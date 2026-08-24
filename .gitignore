@@ -14,7 +14,10 @@ __pycache__/
 /.vcpkg_archives/
 /build/
 /docs/build/
+/docs/superpowers/
 /release/
+
+/.superpowers/
 
 /.ccache*/
 /*_installed/
