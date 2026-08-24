@@ -226,6 +226,14 @@ jobs:
             --cmake_build_dir build_ort `
             --is_extended_minimal_build_or_higher
 
+      - name: Verify reduced operators for ONNX Runtime (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+          REDUCED_OPERATORS_BUILD_DIR: build_ort
+        run: |
+          & $env:PYTHON_COMMAND tests/ReducedOperators/test_reduced_operators.py
+
       - name: Configure ONNX Runtime (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
