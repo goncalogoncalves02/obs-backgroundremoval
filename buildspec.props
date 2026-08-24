@@ -11,6 +11,9 @@ PLUGIN_LATEST_VERSION_URL=https://royshil.github.io/obs-backgroundremoval/metada
 onnxruntime_reduced_ops_config=src/required_operators.config
 osx_deployment_target=13.0
 windows_sdk_version=10.0.26100
+windows_ml_version=2.2.12
+windows_ml_url=https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.2.12/microsoft.windows.ai.machinelearning.2.2.12.nupkg
+windows_ml_sha256=9cb60543337e6e4eac2a95c2fcb9650a880697ae7190d15499d801c907849da3
 
 obs_studio_git_tag=32.2.1
 onnxruntime_git_tag=v1.28.0
