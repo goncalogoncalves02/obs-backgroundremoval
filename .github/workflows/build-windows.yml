@@ -128,6 +128,44 @@ jobs:
 
       # END: Set up toolchains
 
+      - name: Configure Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          CMAKE_PREFIX_PATH: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}
+          CMAKE_SYSTEM_VERSION: ${{ steps.buildspec.outputs.windows_sdk_version }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke -G Ninja `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH" `
+            "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION"
+
+      - name: Build Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          cmake --build build_windows_ml_smoke --target windows-ml-smoke --config Release --parallel
+
+      - name: Test Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          ctest --test-dir build_windows_ml_smoke --output-on-failure
+          $env:WINDOWS_ML_SMOKE_EXE = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke') 'windows-ml-smoke.exe'
+          $env:WINDOWS_ML_SMOKE_MODEL = Join-Path $env:GITHUB_WORKSPACE 'data\models\mediapipe.onnx'
+          & $env:PYTHON_COMMAND tests/WindowsMlSmoke/test_windows_ml_smoke.py
+
       - name: Configure OBS Studio (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
