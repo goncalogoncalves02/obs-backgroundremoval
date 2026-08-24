@@ -26,6 +26,7 @@
 - Every new source, test, and CMake file must carry the repository's SPDX copyright and Apache-2.0 license headers so REUSE remains green.
 - Preserve all changes in the original `GPU` worktree.
 - Commits use `Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>` only and contain no assistant attribution or co-author trailer.
+- Every commit containing generated code uses both DCO sign-off and cryptographic signing via `git commit -s -S`; the user explicitly confirmed the repository contribution requirements before Task 2 began.
 
 ---
 
@@ -120,7 +121,7 @@ Expected: all tests pass and no whitespace errors are reported.
 
 ```bash
 git add buildspec.props scripts/download-deps.cmake tests/WindowsMlSmoke/test_windows_ml_dependency.py
-git -c user.name='Gonçalo Filipe Brigues Gonçalves' -c user.email='goncalogoncalves.02@gmail.com' commit -m 'Pin self-contained Windows ML runtime'
+git -c user.name='Gonçalo Filipe Brigues Gonçalves' -c user.email='goncalogoncalves.02@gmail.com' commit -s -S -m 'Pin self-contained Windows ML runtime'
 ```
 
 ---
@@ -196,7 +197,7 @@ Expected: portable tests pass; Windows-only black-box test is explicitly skipped
 
 ```bash
 git add tools/windows-ml-smoke tests/WindowsMlSmoke/test_windows_ml_smoke.py
-git -c user.name='Gonçalo Filipe Brigues Gonçalves' -c user.email='goncalogoncalves.02@gmail.com' commit -m 'Add Windows ML CPU inference smoke tool'
+git -c user.name='Gonçalo Filipe Brigues Gonçalves' -c user.email='goncalogoncalves.02@gmail.com' commit -s -S -m 'Add Windows ML CPU inference smoke tool'
 ```
 
 ---
@@ -245,7 +246,7 @@ Expected: all local executable tests pass, Windows-only black-box inference is s
 
 ```bash
 git add .github/workflows/build-windows.yml
-git -c user.name='Gonçalo Filipe Brigues Gonçalves' -c user.email='goncalogoncalves.02@gmail.com' commit -m 'Run Windows ML CPU smoke test in CI'
+git -c user.name='Gonçalo Filipe Brigues Gonçalves' -c user.email='goncalogoncalves.02@gmail.com' commit -s -S -m 'Run Windows ML CPU smoke test in CI'
 ```
 
 ---
