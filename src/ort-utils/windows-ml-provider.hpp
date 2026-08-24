@@ -12,7 +12,8 @@
 
 namespace Ort {
 struct Env;
-}
+struct SessionOptions;
+} // namespace Ort
 
 namespace windows_ml {
 
@@ -57,9 +58,26 @@ struct ProviderPreparationResult {
 	std::string error;
 };
 
+struct ProviderSessionResult {
+	std::string requested_provider_name;
+	std::string discovered_provider_name;
+	std::string ready_state_before;
+	std::string ready_state_after;
+	bool process_activation_attempted{};
+	bool provider_registration_succeeded{};
+	std::optional<EpDeviceInfo> selected_device;
+	bool succeeded{};
+	std::optional<std::uint32_t> error_hresult;
+	std::string error;
+};
+
 [[nodiscard]] ProviderDiscoveryResult discover_providers() noexcept;
 
 [[nodiscard]] ProviderPreparationResult prepare_provider(Ort::Env &environment,
 							 std::string_view exact_provider_name) noexcept;
+
+[[nodiscard]] ProviderSessionResult configure_provider_session(Ort::Env &environment,
+							       Ort::SessionOptions &session_options,
+							       std::string_view exact_provider_name) noexcept;
 
 } // namespace windows_ml

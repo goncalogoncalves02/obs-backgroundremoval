@@ -15,6 +15,12 @@ add_library(windows-ml-smoke-benchmark STATIC benchmark.cpp)
 target_compile_features(windows-ml-smoke-benchmark PUBLIC cxx_std_20)
 target_include_directories(windows-ml-smoke-benchmark PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
+add_library(windows-ml-smoke-provider-policy STATIC ../../src/ort-utils/windows-ml-provider-policy.cpp)
+target_compile_features(windows-ml-smoke-provider-policy PUBLIC cxx_std_20)
+target_include_directories(
+  windows-ml-smoke-provider-policy PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../src/ort-utils"
+)
+
 add_library(windows-ml-smoke-provider-report STATIC provider-report.cpp)
 target_compile_features(windows-ml-smoke-provider-report PUBLIC cxx_std_20)
 target_include_directories(
@@ -34,9 +40,13 @@ if(WINDOWS_ML_SMOKE_CLI_TESTS_ONLY)
   add_executable(windows-ml-smoke-provider-report-test tests/provider-report-test.cpp)
   target_link_libraries(windows-ml-smoke-provider-report-test PRIVATE windows-ml-smoke-provider-report)
 
+  add_executable(windows-ml-smoke-provider-policy-test tests/provider-policy-test.cpp)
+  target_link_libraries(windows-ml-smoke-provider-policy-test PRIVATE windows-ml-smoke-provider-policy)
+
   add_test(NAME windows-ml-smoke-cli COMMAND windows-ml-smoke-cli-test)
   add_test(NAME windows-ml-smoke-benchmark COMMAND windows-ml-smoke-benchmark-test)
   add_test(NAME windows-ml-smoke-provider-report COMMAND windows-ml-smoke-provider-report-test)
+  add_test(NAME windows-ml-smoke-provider-policy COMMAND windows-ml-smoke-provider-policy-test)
   return()
 endif()
 
@@ -51,8 +61,8 @@ target_compile_features(windows-ml-smoke PRIVATE cxx_std_20)
 target_compile_definitions(windows-ml-smoke PRIVATE WINDOWS_ML_PACKAGE_VERSION="2.2.12")
 target_include_directories(windows-ml-smoke PRIVATE ../../src/ort-utils)
 target_link_libraries(
-  windows-ml-smoke
-  PRIVATE windows-ml-smoke-cli windows-ml-smoke-provider-report WindowsML::Api WindowsML::OnnxRuntime
+  windows-ml-smoke PRIVATE windows-ml-smoke-cli windows-ml-smoke-provider-policy windows-ml-smoke-provider-report
+                           WindowsML::Api WindowsML::OnnxRuntime
 )
 
 add_custom_command(

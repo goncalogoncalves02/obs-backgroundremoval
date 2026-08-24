@@ -9,6 +9,7 @@
 #include <winml/onnxruntime_cxx_api.h>
 
 #include "windows-ml-provider.hpp"
+#include "windows-ml-provider-policy.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -61,6 +62,20 @@ private:
 	}
 }
 
+[[nodiscard]] ProviderReadyState provider_ready_state(WinMLEpReadyState state) noexcept
+{
+	switch (state) {
+	case WinMLEpReadyState_Ready:
+		return ProviderReadyState::Ready;
+	case WinMLEpReadyState_NotReady:
+		return ProviderReadyState::NotReady;
+	case WinMLEpReadyState_NotPresent:
+		return ProviderReadyState::NotPresent;
+	default:
+		return ProviderReadyState::Unknown;
+	}
+}
+
 [[nodiscard]] std::string certification_name(WinMLEpCertification certification)
 {
 	switch (certification) {
@@ -109,13 +124,22 @@ private:
 	return message;
 }
 
+[[nodiscard]] std::string sanitize_error(std::string_view error)
+{
+	std::string sanitized(error);
+	std::replace_if(
+		sanitized.begin(), sanitized.end(),
+		[](char character) { return character == '\r' || character == '\n'; }, ' ');
+	return sanitized;
+}
+
 template<typename Result> void set_hresult_error(Result &result, HRESULT hresult, std::string_view context)
 {
 	result.error_hresult = static_cast<std::uint32_t>(hresult);
-	result.error = std::string(context);
+	result.error = sanitize_error(context);
 	const auto system_message = system_hresult_message(hresult);
 	if (!system_message.empty()) {
-		result.error += ": " + system_message;
+		result.error += ": " + sanitize_error(system_message);
 	}
 }
 
@@ -210,6 +234,41 @@ template<typename SizeFunction, typename CopyFunction>
 		.vendor_id = hardware.VendorId(),
 		.device_id = hardware.DeviceId(),
 	};
+}
+
+struct DeviceCandidate {
+	Ort::ConstEpDevice device;
+	EpDeviceInfo info;
+};
+
+[[nodiscard]] bool attach_existing_amd_gpu_device(Ort::Env &environment, Ort::SessionOptions &session_options,
+						  std::string_view exact_provider_name, ProviderSessionResult &result)
+{
+	std::vector<DeviceCandidate> candidates;
+	for (const auto &device : environment.GetEpDevices()) {
+		auto info = copy_device(device);
+		if (info.ep_name == exact_provider_name && info.hardware_type == "gpu" &&
+		    info.vendor_id == kAmdVendorId) {
+			candidates.push_back({device, std::move(info)});
+		}
+	}
+	if (candidates.empty()) {
+		return false;
+	}
+
+	const auto selected =
+		std::min_element(candidates.begin(), candidates.end(), [](const auto &left, const auto &right) {
+			return std::tie(left.info.vendor_id, left.info.device_id) <
+			       std::tie(right.info.vendor_id, right.info.device_id);
+		});
+	std::vector<Ort::ConstEpDevice> selected_devices{selected->device};
+	Ort::KeyValuePairs empty_options;
+	session_options.AppendExecutionProvider_V2(environment, selected_devices, empty_options);
+
+	result.discovered_provider_name = selected->info.ep_name;
+	result.selected_device = selected->info;
+	result.succeeded = true;
+	return true;
 }
 
 } // namespace
@@ -346,6 +405,106 @@ ProviderPreparationResult prepare_provider(Ort::Env &environment, std::string_vi
 		result.error = exception.what();
 	} catch (...) {
 		result.error = "unknown failure while preparing the Windows ML provider";
+	}
+	return result;
+}
+
+ProviderSessionResult configure_provider_session(Ort::Env &environment, Ort::SessionOptions &session_options,
+						 std::string_view exact_provider_name) noexcept
+{
+	ProviderSessionResult result;
+	result.requested_provider_name = exact_provider_name;
+	try {
+		if (attach_existing_amd_gpu_device(environment, session_options, exact_provider_name, result)) {
+			return result;
+		}
+
+		WinMLEpCatalogHandle raw_catalog = nullptr;
+		const HRESULT create_result = WinMLEpCatalogCreate(&raw_catalog);
+		if (FAILED(create_result)) {
+			set_hresult_error(result, create_result, "failed to create the Windows ML provider catalog");
+			return result;
+		}
+		Catalog catalog(raw_catalog);
+
+		WinMLEpHandle provider = nullptr;
+		const HRESULT find_result = WinMLEpCatalogFindProvider(
+			catalog.get(), result.requested_provider_name.c_str(), nullptr, &provider);
+		if (FAILED(find_result) || provider == nullptr) {
+			result.error = "provider not found: " + result.requested_provider_name;
+			if (FAILED(find_result)) {
+				set_hresult_error(result, find_result, result.error);
+			}
+			return result;
+		}
+
+		result.discovered_provider_name = provider_name(provider);
+		if (result.discovered_provider_name != result.requested_provider_name) {
+			result.error = "catalog returned a provider name that does not exactly match the request";
+			return result;
+		}
+
+		WinMLEpReadyState ready_state{};
+		HRESULT state_result = WinMLEpGetReadyState(provider, &ready_state);
+		if (FAILED(state_result)) {
+			set_hresult_error(result, state_result, "failed to read the provider ready state");
+			return result;
+		}
+		result.ready_state_before = ready_state_name(ready_state);
+		result.ready_state_after = result.ready_state_before;
+
+		switch (activation_action(provider_ready_state(ready_state))) {
+		case ProviderActivationAction::UnavailableWithoutActivation:
+			result.error = "provider is unavailable without activation: " + result.ready_state_before;
+			return result;
+		case ProviderActivationAction::ActivateInstalledThenRegister: {
+			result.process_activation_attempted = true;
+			const HRESULT ensure_result = WinMLEpEnsureReady(provider);
+			if (FAILED(ensure_result)) {
+				set_hresult_error(result, ensure_result,
+						  "failed to activate the installed provider in this process");
+				return result;
+			}
+
+			state_result = WinMLEpGetReadyState(provider, &ready_state);
+			if (FAILED(state_result)) {
+				set_hresult_error(result, state_result, "failed to re-read the provider ready state");
+				return result;
+			}
+			result.ready_state_after = ready_state_name(ready_state);
+			if (provider_ready_state(ready_state) != ProviderReadyState::Ready) {
+				result.error = "provider is not ready after process-local activation";
+				return result;
+			}
+			break;
+		}
+		case ProviderActivationAction::RegisterReady:
+			break;
+		}
+
+		const auto library_path = provider_library_path(provider);
+		if (library_path.empty()) {
+			result.error = "ready provider has an empty library path";
+			return result;
+		}
+
+		environment.RegisterExecutionProviderLibrary(result.discovered_provider_name.c_str(),
+							     std::filesystem::path(library_path).wstring());
+		result.provider_registration_succeeded = true;
+
+		if (!attach_existing_amd_gpu_device(environment, session_options, result.discovered_provider_name,
+						    result)) {
+			result.error = "registered provider has no exact-name AMD GPU ONNX Runtime EP device";
+			return result;
+		}
+	} catch (HRESULT hresult) {
+		set_hresult_error(result, hresult, "Windows ML provider configuration failed");
+	} catch (const Ort::Exception &exception) {
+		result.error = sanitize_error(std::string("ONNX Runtime provider failure: ") + exception.what());
+	} catch (const std::exception &exception) {
+		result.error = sanitize_error(exception.what());
+	} catch (...) {
+		result.error = "unknown failure while configuring the Windows ML provider";
 	}
 	return result;
 }
