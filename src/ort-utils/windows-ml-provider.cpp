@@ -17,6 +17,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace windows_ml {
@@ -329,8 +330,8 @@ ProviderDiscoveryResult discover_providers() noexcept
 ProviderPreparationResult prepare_provider(Ort::Env &environment, std::string_view exact_provider_name) noexcept
 {
 	ProviderPreparationResult result;
-	result.requested_provider_name = exact_provider_name;
 	try {
+		result.requested_provider_name = exact_provider_name;
 		WinMLEpCatalogHandle raw_catalog = nullptr;
 		const HRESULT create_result = WinMLEpCatalogCreate(&raw_catalog);
 		if (FAILED(create_result)) {
@@ -422,11 +423,11 @@ ProviderPreparationResult prepare_provider(Ort::Env &environment, std::string_vi
 	} catch (const CatalogHresultFailure &failure) {
 		set_hresult_error(result, failure.hresult(), failure.first(), failure.second(), failure.third());
 	} catch (const Ort::Exception &exception) {
-		result.error = std::string("ONNX Runtime provider failure: ") + exception.what();
+		assign_sanitized_diagnostic(result.error, "ONNX Runtime provider failure: ", exception.what());
 	} catch (const std::exception &exception) {
-		result.error = exception.what();
+		assign_sanitized_diagnostic(result.error, exception.what());
 	} catch (...) {
-		result.error = "unknown failure while preparing the Windows ML provider";
+		assign_sanitized_diagnostic(result.error, "unknown failure while preparing the Windows ML provider");
 	}
 	return result;
 }
