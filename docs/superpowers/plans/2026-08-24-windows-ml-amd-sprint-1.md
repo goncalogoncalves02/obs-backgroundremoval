@@ -19,6 +19,7 @@
 - Do not use `bin/build.bat` or `bin/setup.bat` as proof of the baseline: they reference a missing `windows` CMake preset, missing `scripts/BuildOBS.psm1` and `scripts/BuildOnnxRuntime.psm1`, and absent `*_git_commit` properties.
 - Do not push, create a pull request, add labels, publish artifacts, or alter external state. The controller owns those actions and must obtain user confirmation immediately before them.
 - Do not commit the baseline summary until Windows CI and manual OBS CPU evidence have both passed.
+- Each Windows-focused sprint blocks only on `Check CI`, the exact `build-windows-x64 / build` job succeeding for the tested commit, the intact Windows artifact, and its required manual Windows hardware test. The full cross-platform matrix may continue in the background and is required only before merge, release, or an explicitly shared cross-platform acceptance point.
 - Commits use only the user's configured Git identity and contain no assistant attribution or co-author trailer.
 - Preserve all changes in the original `GPU` worktree.
 
@@ -143,7 +144,7 @@ Create `.superpowers/windows-results/sprint-1/windows-baseline-handoff.md` with 
 ````markdown
 # Sprint 1 Windows baseline handoff
 
-Run this gate only after the controller confirms that the feature branch has been pushed, a draft pull request exists, the `upload-artifacts` label is present, and both `PR Check / build-windows-x64` and `Check CI` have passed.
+Run this gate only after the controller confirms that the feature branch has been pushed, a draft pull request exists, the `upload-artifacts` label is present, and `Check CI` has passed. The per-sprint PR Check requirement is the exact `build-windows-x64 / build` job for this checkout; the overall PR Check run may remain in progress while other platform jobs continue.
 
 ## 1. Prepare the Windows checkout
 
@@ -158,7 +159,8 @@ git switch --track origin/feature/windows-ml-amd
 $EvidenceDir = Join-Path (Get-Location) '.superpowers\windows-results\sprint-1'
 New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
 git status --short --branch | Tee-Object -FilePath (Join-Path $EvidenceDir 'git-status.txt')
-git rev-parse HEAD | Tee-Object -FilePath (Join-Path $EvidenceDir 'git-head.txt')
+$LocalHead = (git rev-parse HEAD).Trim()
+$LocalHead | Tee-Object -FilePath (Join-Path $EvidenceDir 'git-head.txt')
 ```
 
 Expected: the branch is `feature/windows-ml-amd`, the worktree is clean, and `git-head.txt` records the commit tested by CI.
@@ -175,20 +177,41 @@ gh auth login
 Then run:
 
 ```powershell
-$Run = gh run list --workflow 'PR Check' --branch feature/windows-ml-amd --limit 1 --json databaseId,status,conclusion | ConvertFrom-Json | Select-Object -First 1
-$Run | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $EvidenceDir 'pr-check-run.json')
-if ($Run.status -ne 'completed' -or $Run.conclusion -ne 'success') { throw 'PR Check has not completed successfully.' }
+$Repository = 'goncalogoncalves02/obs-backgroundremoval'
+$Runs = gh api "repos/$Repository/actions/workflows/pr-check.yml/runs?branch=feature/windows-ml-amd&per_page=100" | ConvertFrom-Json
+$Run = $Runs.workflow_runs | Where-Object { $_.head_sha -eq $LocalHead } | Sort-Object created_at -Descending | Select-Object -First 1
+if ($null -eq $Run) { throw "No PR Check run was found for the local checkout $LocalHead." }
+$Jobs = gh api "repos/$Repository/actions/runs/$($Run.id)/jobs?per_page=100" | ConvertFrom-Json
+$WindowsJob = $Jobs.jobs | Where-Object { $_.name -eq 'build-windows-x64 / build' } | Select-Object -First 1
+if ($null -eq $WindowsJob) { throw 'The exact PR Check Windows job was not found.' }
+if ($WindowsJob.status -ne 'completed' -or $WindowsJob.conclusion -ne 'success') { throw "The Windows job is not successful: $($WindowsJob.status)/$($WindowsJob.conclusion)." }
+$RunEvidence = [ordered]@{
+    run_id = $Run.id
+    status = $Run.status
+    conclusion = $Run.conclusion
+    head_sha = $Run.head_sha
+    windows_job_id = $WindowsJob.id
+    windows_job_name = $WindowsJob.name
+    windows_job_status = $WindowsJob.status
+    windows_job_conclusion = $WindowsJob.conclusion
+}
+$RunEvidence | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $EvidenceDir 'pr-check-run.json')
 
 $ArtifactDir = Join-Path $EvidenceDir 'artifact'
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
-gh run download $Run.databaseId --dir $ArtifactDir
-
-$ZipPath = Get-ChildItem -LiteralPath $ArtifactDir -Recurse -Filter 'obs-backgroundremoval_1.4.1.dll.zip' | Select-Object -First 1 -ExpandProperty FullName
-if ([string]::IsNullOrWhiteSpace($ZipPath)) { throw 'Windows plugin artifact was not found in the downloaded workflow artifacts.' }
+$Artifacts = gh api "repos/$Repository/actions/runs/$($Run.id)/artifacts?per_page=100" | ConvertFrom-Json
+$Artifact = $Artifacts.artifacts | Where-Object { $_.name -eq 'obs-backgroundremoval_1.4.1.dll.zip' -and -not $_.expired } | Select-Object -First 1
+if ($null -eq $Artifact) { throw 'The exact Windows plugin artifact was not found for the matching PR Check run.' }
+$ZipPath = Join-Path $ArtifactDir 'obs-backgroundremoval_1.4.1.dll.zip'
+$ArtifactZipEndpoint = "https://api.github.com/repos/$Repository/actions/artifacts/$($Artifact.id)/zip"
+$GitHubToken = gh auth token
+if ([string]::IsNullOrWhiteSpace($GitHubToken)) { throw 'GitHub CLI did not return an authentication token.' }
+Invoke-WebRequest -Uri $ArtifactZipEndpoint -Headers @{ Authorization = "Bearer $GitHubToken"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' } -OutFile $ZipPath -MaximumRedirection 5
+if (-not (Test-Path -LiteralPath $ZipPath) -or (Get-Item -LiteralPath $ZipPath).Length -eq 0) { throw 'The raw Windows plugin artifact archive was not downloaded.' }
 Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath | Format-List | Out-File -Encoding utf8 (Join-Path $EvidenceDir 'artifact-sha256.txt')
 ```
 
-Expected: `pr-check-run.json` reports `success` and the zip hash is recorded.
+Expected: `pr-check-run.json` records the matching run and a successful `build-windows-x64 / build` job, the exact non-expired artifact is downloaded as a raw archive, and the zip hash is recorded. The overall PR Check conclusion is recorded but is not a per-sprint blocking condition.
 
 ## 3. Install the baseline plugin safely
 
@@ -196,6 +219,8 @@ Close OBS before running:
 
 ```powershell
 $PackageDir = Join-Path $EvidenceDir 'package'
+if (Test-Path -LiteralPath $PackageDir) { throw "Package staging directory already exists: $PackageDir" }
+New-Item -ItemType Directory -Path $PackageDir | Out-Null
 Expand-Archive -LiteralPath $ZipPath -DestinationPath $PackageDir -Force
 
 $PluginSource = Join-Path $PackageDir 'obs-backgroundremoval'
@@ -204,13 +229,14 @@ $BackupDestination = Join-Path $EvidenceDir 'previous-plugin-backup'
 
 if (-not (Test-Path -LiteralPath $PluginSource)) { throw "Plugin folder not found: $PluginSource" }
 if (Test-Path -LiteralPath $PluginDestination) {
-    Copy-Item -LiteralPath $PluginDestination -Destination $BackupDestination -Recurse -Force
+    if (Test-Path -LiteralPath $BackupDestination) { throw "Backup destination already exists: $BackupDestination" }
+    Move-Item -LiteralPath $PluginDestination -Destination $BackupDestination
 }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PluginDestination) | Out-Null
 Copy-Item -LiteralPath $PluginSource -Destination $PluginDestination -Recurse -Force
 ```
 
-The previous plugin, when present, is copied to `.superpowers\windows-results\sprint-1\previous-plugin-backup` before replacement.
+The package is extracted only into a fresh staging directory. The previous plugin, when present, is moved to `.superpowers\windows-results\sprint-1\previous-plugin-backup` before replacement. A pre-existing staging directory or backup stops the procedure rather than retaining stale package files or merging plugin versions.
 
 ## 4. Run the OBS CPU acceptance test
 
@@ -308,11 +334,13 @@ Do not stage or commit. The controller dispatches code review against the uncomm
 
 - [ ] **Step 1: Validate the returned evidence before editing tracked files**
 
-Run from the Linux controller after extracting the user-provided archive into `.superpowers/windows-results/sprint-1/`:
+Run from the Linux controller after the controller has confirmed `Check CI` success for the tested commit and has extracted the user-provided archive into `.superpowers/windows-results/sprint-1/`:
 
 ```bash
-test "$(jq -r '.status' .superpowers/windows-results/sprint-1/pr-check-run.json)" = "completed"
-test "$(jq -r '.conclusion' .superpowers/windows-results/sprint-1/pr-check-run.json)" = "success"
+test "$(jq -r '.windows_job_name' .superpowers/windows-results/sprint-1/pr-check-run.json)" = "build-windows-x64 / build"
+test "$(jq -r '.windows_job_status' .superpowers/windows-results/sprint-1/pr-check-run.json)" = "completed"
+test "$(jq -r '.windows_job_conclusion' .superpowers/windows-results/sprint-1/pr-check-run.json)" = "success"
+test "$(jq -r '.head_sha' .superpowers/windows-results/sprint-1/pr-check-run.json)" = "$(cat .superpowers/windows-results/sprint-1/git-head.txt)"
 test "$(jq -r '.result' .superpowers/windows-results/sprint-1/manual-result.json)" = "pass"
 test "$(jq -r '.provider' .superpowers/windows-results/sprint-1/manual-result.json)" = "cpu"
 test "$(jq -r '.model' .superpowers/windows-results/sprint-1/manual-result.json)" = "MediaPipe"
@@ -334,7 +362,7 @@ In `docs/windows-ml-baseline.md`, keep the source-audit and Linux-environment pa
 | Validation | Evidence |
 |---|---|
 | Tested commit | Exact value from `git-head.txt` |
-| PR Check | Run database ID from `pr-check-run.json`; conclusion `success` |
+| Windows CI | Run ID and exact `build-windows-x64 / build` job ID from `pr-check-run.json`; job conclusion `success` |
 | Windows package | `obs-backgroundremoval_1.4.1.dll.zip` and exact SHA-256 from `artifact-sha256.txt` |
 | Windows system | Exact product, version, build, and architecture from `windows-info.txt` |
 | Inference provider | `cpu` |
@@ -355,7 +383,7 @@ Run:
 ```bash
 git diff --check
 if rg -n 'awaiting|Exact value|Exact product' docs/windows-ml-baseline.md; then exit 1; fi
-rg -n 'PR Check|success|SHA-256|cpu|MediaPipe|Five minutes|None observed' docs/windows-ml-baseline.md
+rg -n 'Windows CI|build-windows-x64 / build|success|SHA-256|cpu|MediaPipe|Five minutes|None observed' docs/windows-ml-baseline.md
 git diff --name-only
 ```
 
