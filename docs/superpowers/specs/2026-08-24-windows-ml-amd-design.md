@@ -33,7 +33,7 @@ OBS frame
 
 Windows ML integration is limited to build configuration, provider discovery and registration, execution-provider device selection, and session creation. `Model.hpp`, model-specific preprocessing, postprocessing, and OBS rendering remain provider-independent.
 
-The implementation uses a standalone smoke-test executable to remove OBS from the initial compatibility and hardware investigation. GPU support is not exposed in OBS until the exact MediaPipe `.ort` model passes the isolated GPU correctness gate.
+The implementation uses a standalone smoke-test executable to remove OBS from the initial compatibility and hardware investigation. GPU support is not exposed in OBS until the exact tracked MediaPipe model, `data/models/mediapipe.onnx`, passes the isolated GPU correctness gate.
 
 ## Components
 
@@ -168,7 +168,7 @@ Create the feature workspace from `main`, ignore `.superpowers/`, audit the curr
 
 ### Sprint 2: Windows ML and CPU smoke test
 
-Pin the self-contained Windows ML package, add the Windows-only smoke target and CLI, report runtime details, and load the exact MediaPipe `.ort` model on CPU.
+Pin the self-contained Windows ML package, add the Windows-only smoke target and CLI, report runtime details, and load the exact tracked `data/models/mediapipe.onnx` model on CPU.
 
 Gate: x64 Release build and CPU session must pass on Windows before provider preparation work proceeds.
 
