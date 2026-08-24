@@ -131,7 +131,7 @@ jobs:
       - name: Configure Windows ML smoke tool (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
-          CMAKE_PREFIX_PATH: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}
+          WINDOWS_ML_DIR: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}\build\cmake
           CMAKE_SYSTEM_VERSION: ${{ steps.buildspec.outputs.windows_sdk_version }}
         run: |
           $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
@@ -140,12 +140,11 @@ jobs:
 
           cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke -G Ninja `
             "-DCMAKE_BUILD_TYPE=Release" `
-            "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH" `
+            "-Dmicrosoft.windows.ai.machinelearning_DIR=$env:WINDOWS_ML_DIR" `
             "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION"
 
           cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke_cli -G Ninja `
             "-DCMAKE_BUILD_TYPE=Release" `
-            "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH" `
             "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION" `
             "-DWINDOWS_ML_SMOKE_CLI_TESTS_ONLY=ON"
 
