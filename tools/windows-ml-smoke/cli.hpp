@@ -10,10 +10,19 @@
 
 namespace windows_ml_smoke {
 
-inline constexpr std::string_view kUsage = "usage=windows-ml-smoke --provider cpu --model <path>";
+inline constexpr std::string_view kUsage = "usage=windows-ml-smoke (--provider cpu --model <path> | --list-providers | "
+					   "--prepare-provider <exact-provider-name>)";
+
+enum class CliCommand {
+	CpuInference,
+	ListProviders,
+	PrepareProvider,
+};
 
 struct CliOptions {
+	CliCommand command;
 	std::string model_path;
+	std::string provider_name;
 };
 
 struct ParseResult {
