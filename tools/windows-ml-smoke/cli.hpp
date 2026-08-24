@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
@@ -10,19 +11,26 @@
 
 namespace windows_ml_smoke {
 
-inline constexpr std::string_view kUsage = "usage=windows-ml-smoke (--provider cpu --model <path> | --list-providers | "
-					   "--prepare-provider <exact-provider-name>)";
+inline constexpr std::string_view kUsage =
+	"usage=windows-ml-smoke (--provider <name> --model <path> [--iterations <1..10000>] | "
+	"--compare cpu <name> --model <path> --iterations <1..10000> | --list-providers | "
+	"--prepare-provider <exact-provider-name>)";
 
 enum class CliCommand {
-	CpuInference,
+	Inference,
+	Compare,
 	ListProviders,
 	PrepareProvider,
+	CpuInference = Inference,
 };
 
 struct CliOptions {
 	CliCommand command;
-	std::string model_path;
 	std::string provider_name;
+	std::string comparison_provider_name;
+	std::string model_path;
+	std::size_t iterations;
+	bool benchmark_requested;
 };
 
 struct ParseResult {
