@@ -249,10 +249,11 @@ $Result = [ordered]@{
 }
 $Result | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $EvidenceDir 'manual-result.json')
 
-Compress-Archive -Path (Join-Path $EvidenceDir '*') -DestinationPath (Join-Path (Get-Location) 'sprint-1-windows-evidence.zip') -Force
+$ArchivePath = Join-Path (Split-Path -Parent $EvidenceDir) 'sprint-1-windows-evidence.zip'
+Compress-Archive -Path (Join-Path $EvidenceDir '*') -DestinationPath $ArchivePath -Force
 ```
 
-Send `sprint-1-windows-evidence.zip` to the controller. If any manual check fails, change `result` to `fail`, change the corresponding field, keep the OBS log, and send the evidence without attempting speculative source changes.
+Send `.superpowers\windows-results\sprint-1-windows-evidence.zip` to the controller. If any manual check fails, change `result` to `fail`, change the corresponding field, keep the OBS log, and send the evidence without attempting speculative source changes.
 ````
 
 - [ ] **Step 5: Verify documentation scope and quality**
