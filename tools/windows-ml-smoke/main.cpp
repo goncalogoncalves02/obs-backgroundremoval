@@ -9,6 +9,8 @@
 #include <winml/onnxruntime_cxx_api.h>
 
 #include "cli.hpp"
+#include "provider-report.hpp"
+#include "windows-ml-provider.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -30,6 +32,7 @@ constexpr int kSuccessExitCode = 0;
 constexpr int kUsageExitCode = 2;
 constexpr int kUnsupportedPlatformExitCode = 3;
 constexpr int kInferenceExitCode = 4;
+constexpr int kProviderExitCode = 5;
 constexpr std::size_t kInputElementCount = 110592;
 constexpr std::size_t kOutputElementCount = 73728;
 const std::vector<int64_t> kExpectedInputShape{1, 144, 256, 3};
@@ -37,11 +40,17 @@ const std::vector<int64_t> kExpectedOutputShape{1, 144, 256, 2};
 
 void print_error(std::string_view message)
 {
-	std::cerr << "error=";
-	for (const char character : message) {
-		std::cerr << (character == '\r' || character == '\n' ? ' ' : character);
+	std::cerr << "error=" << windows_ml_smoke::sanitize_single_line(message) << '\n';
+}
+
+[[nodiscard]] std::string provider_error(std::string_view message, const std::optional<std::uint32_t> &hresult)
+{
+	const auto detail = message.empty() ? std::string("provider operation failed without a diagnostic")
+					    : std::string(message);
+	if (!hresult.has_value()) {
+		return detail;
 	}
-	std::cerr << '\n';
+	return "HRESULT " + windows_ml_smoke::format_hresult(*hresult) + ": " + detail;
 }
 
 [[nodiscard]] std::optional<std::string> native_windows_version(std::string &error)
@@ -116,6 +125,38 @@ int main(int argc, char **argv)
 	if (!windows_version.has_value()) {
 		print_error(version_error);
 		return kUnsupportedPlatformExitCode;
+	}
+
+	if (parsed.options->command == windows_ml_smoke::CliCommand::ListProviders) {
+		const auto discovery = windows_ml::discover_providers();
+		std::cout << windows_ml_smoke::format_provider_discovery_report(discovery);
+		if (!discovery.succeeded) {
+			print_error(provider_error(discovery.error, discovery.error_hresult));
+			return kProviderExitCode;
+		}
+		return kSuccessExitCode;
+	}
+
+	if (parsed.options->command == windows_ml_smoke::CliCommand::PrepareProvider) {
+		windows_ml::ProviderPreparationResult preparation;
+		preparation.requested_provider_name = parsed.options->provider_name;
+		try {
+			Ort::Env environment(ORT_LOGGING_LEVEL_WARNING, "windows-ml-smoke-provider");
+			preparation = windows_ml::prepare_provider(environment, parsed.options->provider_name);
+		} catch (const Ort::Exception &exception) {
+			preparation.error = std::string("ONNX Runtime environment failure: ") + exception.what();
+		} catch (const std::exception &exception) {
+			preparation.error = exception.what();
+		} catch (...) {
+			preparation.error = "unknown failure while creating the ONNX Runtime environment";
+		}
+
+		std::cout << windows_ml_smoke::format_provider_preparation_report(preparation);
+		if (!preparation.succeeded) {
+			print_error(provider_error(preparation.error, preparation.error_hresult));
+			return kProviderExitCode;
+		}
+		return kSuccessExitCode;
 	}
 
 	try {
