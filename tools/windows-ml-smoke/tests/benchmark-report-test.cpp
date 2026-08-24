@@ -35,6 +35,7 @@ windows_ml_smoke::InferenceResult successful_inference()
 	result.effective_provider = "MIGraphXExecutionProvider";
 	result.process_activation_attempted = true;
 	result.provider_registration_succeeded = true;
+	result.cpu_ep_fallback_disabled = true;
 	result.selected_ep_name = "MIGraphX\rExecutionProvider";
 	result.selected_device_id = std::uint32_t{0x744c};
 	result.model_path = "mediapipe.onnx";
@@ -68,6 +69,7 @@ int main()
 		"effective_provider=MIGraphXExecutionProvider\n"
 		"process_activation_attempted=true\n"
 		"provider_registration_succeeded=true\n"
+		"cpu_ep_fallback_disabled=true\n"
 		"selected_ep_name=MIGraphX ExecutionProvider\n"
 		"selected_device_id=0x744c\n"
 		"model=mediapipe.onnx\n"
@@ -93,6 +95,7 @@ int main()
 	unavailable.effective_provider.clear();
 	unavailable.process_activation_attempted = false;
 	unavailable.provider_registration_succeeded = false;
+	unavailable.cpu_ep_fallback_disabled = false;
 	unavailable.selected_ep_name.clear();
 	unavailable.selected_device_id.reset();
 	unavailable.input_count = 0;
@@ -113,6 +116,7 @@ int main()
 		     "effective_provider=\n"
 		     "process_activation_attempted=false\n"
 		     "provider_registration_succeeded=false\n"
+		     "cpu_ep_fallback_disabled=false\n"
 		     "selected_ep_name=\n"
 		     "selected_device_id=\n"
 		     "model=mediapipe.onnx\n"
@@ -136,6 +140,12 @@ int main()
 		     "provider failures must remain single-line unavailable reports with status last");
 	expect_equal(windows_ml_smoke::inference_exit_code(unavailable), 5,
 		     "provider-boundary failures must not be classified as ordinary inference failures");
+	auto full_graph_failure = inference;
+	full_graph_failure.succeeded = false;
+	full_graph_failure.provider_failure = false;
+	full_graph_failure.error = "candidate cannot place the full graph";
+	expect_equal(windows_ml_smoke::inference_exit_code(full_graph_failure), 4,
+		     "a fallback-disabled candidate session failure must remain an inference failure");
 
 	windows_ml_smoke::ComparisonResult comparison;
 	comparison.cpu = inference;
@@ -143,6 +153,7 @@ int main()
 	comparison.cpu.effective_provider = "cpu";
 	comparison.cpu.process_activation_attempted = false;
 	comparison.cpu.provider_registration_succeeded = false;
+	comparison.cpu.cpu_ep_fallback_disabled = false;
 	comparison.cpu.selected_ep_name.clear();
 	comparison.cpu.selected_device_id.reset();
 	comparison.cpu.latency = {.average_ms = 2.5, .median_ms = 2.25, .p95_ms = 3.0};
@@ -165,6 +176,7 @@ int main()
 		"effective_provider=MIGraphXExecutionProvider\n"
 		"process_activation_attempted=true\n"
 		"provider_registration_succeeded=true\n"
+		"cpu_ep_fallback_disabled=true\n"
 		"selected_ep_name=MIGraphX ExecutionProvider\n"
 		"selected_device_id=0x744c\n"
 		"warmup_iterations=10\n"

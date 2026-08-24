@@ -27,6 +27,7 @@ struct InferenceResult {
 	std::string effective_provider;
 	bool process_activation_attempted{};
 	bool provider_registration_succeeded{};
+	bool cpu_ep_fallback_disabled{};
 	std::string selected_ep_name;
 	std::optional<std::uint32_t> selected_device_id;
 	std::string model_path;

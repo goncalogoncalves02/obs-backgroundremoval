@@ -76,6 +76,22 @@ int main()
 	expect(calculate_speedup_ratio(2.5, 1.25) == 2.0, "calculates CPU-to-candidate speedup");
 	expect_invalid_argument([&] { static_cast<void>(calculate_speedup_ratio(2.5, 0.0)); },
 				"rejects a zero candidate average before division");
+	const double infinity = std::numeric_limits<double>::infinity();
+	const double quiet_nan = std::numeric_limits<double>::quiet_NaN();
+	expect_invalid_argument([&] { static_cast<void>(calculate_speedup_ratio(quiet_nan, 1.0)); },
+				"rejects a NaN baseline average");
+	expect_invalid_argument([&] { static_cast<void>(calculate_speedup_ratio(1.0, quiet_nan)); },
+				"rejects a NaN candidate average");
+	expect_invalid_argument([&] { static_cast<void>(calculate_speedup_ratio(infinity, 1.0)); },
+				"rejects an infinite baseline average");
+	expect_invalid_argument([&] { static_cast<void>(calculate_speedup_ratio(1.0, infinity)); },
+				"rejects an infinite candidate average");
+	expect_invalid_argument(
+		[&] {
+			static_cast<void>(calculate_speedup_ratio(std::numeric_limits<double>::max(),
+								  std::numeric_limits<double>::denorm_min()));
+		},
+		"rejects a non-finite quotient from finite operands");
 
 	// Catches: MAE restricted to foreground, wrong foreground channel, or incorrect thresholded IoU counts.
 	constexpr std::array cpu_output{0.9F, 0.1F, 0.4F, 0.6F, 0.8F, 0.2F, 0.3F, 0.7F};

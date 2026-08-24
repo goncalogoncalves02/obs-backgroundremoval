@@ -53,6 +53,7 @@ void append_provider_diagnostics(std::ostringstream &report, const InferenceResu
 	report << "effective_provider=" << sanitize_single_line(result.effective_provider) << '\n';
 	report << "process_activation_attempted=" << boolean_value(result.process_activation_attempted) << '\n';
 	report << "provider_registration_succeeded=" << boolean_value(result.provider_registration_succeeded) << '\n';
+	report << "cpu_ep_fallback_disabled=" << boolean_value(result.cpu_ep_fallback_disabled) << '\n';
 	report << "selected_ep_name=" << sanitize_single_line(result.selected_ep_name) << '\n';
 	report << "selected_device_id=";
 	if (result.selected_device_id.has_value()) {

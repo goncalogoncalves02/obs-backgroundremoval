@@ -101,6 +101,7 @@ class WindowsMlSmokeTest(unittest.TestCase):
         )
         self.assertEqual(report["process_activation_attempted"], "false")
         self.assertEqual(report["provider_registration_succeeded"], "false")
+        self.assertEqual(report["cpu_ep_fallback_disabled"], "false")
         self.assertEqual(report["status"], "unavailable")
         self.assertRegex(result.stderr, r"^error=[^\r\n]+\n$")
 
@@ -175,6 +176,7 @@ class WindowsMlSmokeTest(unittest.TestCase):
         self.assertEqual(report["effective_provider"], "cpu")
         self.assertEqual(report["process_activation_attempted"], "false")
         self.assertEqual(report["provider_registration_succeeded"], "false")
+        self.assertEqual(report["cpu_ep_fallback_disabled"], "false")
         self.assertEqual(report["selected_ep_name"], "")
         self.assertEqual(report["selected_device_id"], "")
         self.assertEqual(report["input_count"], "1")
@@ -221,6 +223,7 @@ class WindowsMlSmokeTest(unittest.TestCase):
         self.assertEqual(report["effective_provider"], "")
         self.assertEqual(report["process_activation_attempted"], "false")
         self.assertEqual(report["provider_registration_succeeded"], "false")
+        self.assertEqual(report["cpu_ep_fallback_disabled"], "false")
         self.assertEqual(report["selected_ep_name"], "")
         self.assertEqual(report["selected_device_id"], "")
         self.assertEqual(report["warmup_iterations"], "10")

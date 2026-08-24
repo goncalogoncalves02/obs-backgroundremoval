@@ -108,6 +108,9 @@ InferenceResult run_inference(std::string_view model_path, std::string_view prov
 				result.error = "unknown failure while configuring the ONNX Runtime provider";
 				return result;
 			}
+
+			session_options.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+			result.cpu_ep_fallback_disabled = true;
 		}
 
 		require(result.iterations > 0, "inference iterations must be positive");
