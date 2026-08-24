@@ -24,7 +24,7 @@ class WindowsMlSmokeTest(unittest.TestCase):
             (("--model", str(self.model)), "--provider cpu is required"),
             (
                 ("--provider", "directml", "--model", str(self.model)),
-                "unsupported provider: directml (only cpu is supported)",
+                "--iterations is required for non-cpu providers",
             ),
             (("--provider", "cpu"), "--model <path> is required"),
             (
@@ -34,10 +34,6 @@ class WindowsMlSmokeTest(unittest.TestCase):
             (
                 ("--provider", "cpu", "--model", str(self.model), "--model", str(self.model)),
                 "duplicate option: --model",
-            ),
-            (
-                ("--provider", "cpu", "--model", str(self.model), "--iterations", "1"),
-                "unknown option: --iterations",
             ),
         )
 
@@ -49,8 +45,10 @@ class WindowsMlSmokeTest(unittest.TestCase):
                 self.assertEqual(
                     result.stderr,
                     f"error={expected_error}\n"
-                    "usage=windows-ml-smoke (--provider cpu --model <path> | "
-                    "--list-providers | --prepare-provider <exact-provider-name>)\n",
+                    "usage=windows-ml-smoke (--provider <name> --model <path> "
+                    "[--iterations <1..10000>] | --compare cpu <name> --model "
+                    "<path> --iterations <1..10000> | --list-providers | "
+                    "--prepare-provider <exact-provider-name>)\n",
                 )
 
     def test_lists_providers_without_mutating_the_catalog(self):
@@ -83,7 +81,12 @@ class WindowsMlSmokeTest(unittest.TestCase):
 
     def test_missing_provider_is_controlled_and_cannot_trigger_acquisition(self):
         result = self._run(
-            "--prepare-provider", "__obs_backgroundremoval_missing_provider__"
+            "--provider",
+            "__obs_backgroundremoval_missing_provider__",
+            "--model",
+            self.model_argument,
+            "--iterations",
+            "3",
         )
 
         self.assertEqual(result.returncode, 5, self._diagnostic(result))
@@ -91,15 +94,13 @@ class WindowsMlSmokeTest(unittest.TestCase):
         self.assertTrue(output_lines)
         self.assertEqual(output_lines[-1], "status=unavailable")
         report = self._parse_report(result.stdout)
-        self.assertEqual(report["operation"], "prepare-provider")
+        self.assertEqual(report["operation"], "inference")
         self.assertEqual(
-            report["requested_provider_name"],
+            report["requested_provider"],
             "__obs_backgroundremoval_missing_provider__",
         )
-        self.assertEqual(report["provider_found"], "false")
-        self.assertEqual(report["registration_succeeded"], "false")
-        self.assertEqual(report["device_count"], "0")
-        self.assertEqual(report["matching_device_count"], "0")
+        self.assertEqual(report["process_activation_attempted"], "false")
+        self.assertEqual(report["provider_registration_succeeded"], "false")
         self.assertEqual(report["status"], "unavailable")
         self.assertRegex(result.stderr, r"^error=[^\r\n]+\n$")
 
@@ -113,9 +114,8 @@ class WindowsMlSmokeTest(unittest.TestCase):
         self.assertEqual(output_lines[-1], "status=ok")
         report = self._parse_report(result.stdout)
         self.assertEqual(
-            set(report),
-            {
-                "status",
+            tuple(report),
+            (
                 "provider",
                 "architecture",
                 "windows_version",
@@ -133,7 +133,8 @@ class WindowsMlSmokeTest(unittest.TestCase):
                 "iterations",
                 "finite_output_count",
                 "latency_ms",
-            },
+                "status",
+            ),
         )
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["provider"], "cpu")
@@ -155,6 +156,48 @@ class WindowsMlSmokeTest(unittest.TestCase):
         latency_ms = float(report["latency_ms"])
         self.assertTrue(math.isfinite(latency_ms))
         self.assertGreaterEqual(latency_ms, 0.0)
+
+    def test_runs_deterministic_cpu_benchmark_with_warmups(self):
+        result = self._run(
+            "--provider",
+            "cpu",
+            "--model",
+            self.model_argument,
+            "--iterations",
+            "3",
+        )
+
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertEqual(result.stderr, "")
+        report = self._parse_report(result.stdout)
+        self.assertEqual(report["operation"], "inference")
+        self.assertEqual(report["requested_provider"], "cpu")
+        self.assertEqual(report["effective_provider"], "cpu")
+        self.assertEqual(report["process_activation_attempted"], "false")
+        self.assertEqual(report["provider_registration_succeeded"], "false")
+        self.assertEqual(report["selected_ep_name"], "")
+        self.assertEqual(report["selected_device_id"], "")
+        self.assertEqual(report["input_count"], "1")
+        self.assertEqual(report["output_count"], "1")
+        self.assertTrue(report["input_name"])
+        self.assertTrue(report["output_name"])
+        self.assertEqual(report["input_element_type"], "float")
+        self.assertEqual(report["output_element_type"], "float")
+        self.assertEqual(report["input_shape"], "1x144x256x3")
+        self.assertEqual(report["output_shape"], "1x144x256x2")
+        self.assertEqual(report["warmup_iterations"], "10")
+        self.assertEqual(report["iterations"], "3")
+        self.assertEqual(report["finite_output_count"], "73728")
+        for key in (
+            "latency_average_ms",
+            "latency_p50_ms",
+            "latency_p95_ms",
+        ):
+            latency_ms = float(report[key])
+            self.assertTrue(math.isfinite(latency_ms))
+            self.assertGreaterEqual(latency_ms, 0.0)
+        self.assertEqual(tuple(report)[-1], "status")
+        self.assertEqual(report["status"], "ok")
 
     @classmethod
     def _run(cls, *arguments):
