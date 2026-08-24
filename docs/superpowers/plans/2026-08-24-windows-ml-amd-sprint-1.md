@@ -4,7 +4,7 @@
 
 **Goal:** Record an evidence-backed baseline of the current `main` architecture and prove that the functionally unchanged Windows plugin builds, packages, loads in OBS, and runs MediaPipe on CPU before Windows ML code is introduced.
 
-**Architecture:** This sprint changes documentation only. It treats `.github/workflows/build-windows.yml` as the canonical Windows build because the current local batch files reference removed presets and PowerShell modules. Raw CI and OBS evidence stays under ignored `.superpowers/windows-results/sprint-1/`; the durable summary is written to `docs/windows-ml-baseline.md` after the Windows gate passes.
+**Architecture:** This sprint originally changed documentation only. The first manual Windows gate exposed a pre-existing reduced-kernel regression in the `main` baseline, so Task 3 adds the smallest build correction and an executable regression check before the gate is repeated. It treats `.github/workflows/build-windows.yml` as the canonical Windows build because the current local batch files reference removed presets and PowerShell modules. Raw CI and OBS evidence stays under ignored `.superpowers/windows-results/sprint-1/`; the durable summary is written to `docs/windows-ml-baseline.md` after the Windows gate passes.
 
 **Tech Stack:** Git, Markdown, GitHub Actions, PowerShell 7, Windows 11, OBS Studio 32.2.1, ONNX Runtime 1.28.0.
 
@@ -15,7 +15,7 @@
 - Baseline commit is `9772c540279cc84b8c5be5442c50ccb00b399a6e` from `main`; the feature branch may additionally contain design and planning documentation but no functional source changes.
 - Preserve ONNX Runtime `v1.28.0`, OBS Studio `32.2.1`, Windows SDK `10.0.26100`, and plugin version `1.4.1` during this sprint.
 - The exact baseline model is `data/models/mediapipe.onnx`; the current `main` branch does not distribute a MediaPipe `.ort` file.
-- Do not modify CMake, C++, workflows, build scripts, models, Linux behaviour, or macOS behaviour.
+- Except for Task 3's Windows reduced-operator correction and regression check, do not modify CMake, C++, workflows, build scripts, models, Linux behaviour, or macOS behaviour.
 - Do not use `bin/build.bat` or `bin/setup.bat` as proof of the baseline: they reference a missing `windows` CMake preset, missing `scripts/BuildOBS.psm1` and `scripts/BuildOnnxRuntime.psm1`, and absent `*_git_commit` properties.
 - Do not push, create a pull request, add labels, publish artifacts, or alter external state. The controller owns those actions and must obtain user confirmation immediately before them.
 - Do not commit the baseline summary until Windows CI and manual OBS CPU evidence have both passed.
@@ -417,3 +417,44 @@ if git log -1 --format='%B' | rg -n 'Co-authored-by|Codex|OpenAI'; then exit 1; 
 ```
 
 Expected: clean worktree; the commit changes only `docs/windows-ml-baseline.md`; no attribution prohibited by the global constraints appears in the commit message.
+
+---
+
+### Task 3: Repair the Windows reduced ONNX Runtime operator set
+
+**Files:**
+
+- Modify: `src/required_operators.config`
+- Create: `tests/ReducedOperators/test_reduced_operators.py`
+- Modify: `.github/workflows/build-windows.yml`
+- Update: `docs/superpowers/plans/2026-08-24-windows-ml-amd-sprint-1.md`
+
+**Interfaces:**
+
+- Consumes: ONNX Runtime `v1.28.0`, the tracked ONNX models, `reduce_op_kernels.py`, and the generated reduced-registration tree under the ONNX Runtime build directory.
+- Produces: a Windows reduced runtime that retains every CPU contrib kernel introduced by ONNX Runtime's x64 graph optimizers for the tracked models, plus a CI check of the generated registration output.
+
+- [x] **Step 1: Add and prove a failing regression test**
+
+Create a Python standard-library test that executes the real ONNX Runtime reduction script with `src/required_operators.config` in a temporary build directory and inspects the generated `cpu_contrib_kernels.cc`. The test must fail against the current configuration because the required active registrations are absent. It must distinguish active registrations from registrations commented out by the reducer.
+
+The expected runtime-generated CPU operator set is:
+
+```text
+com.microsoft;1;FusedConv
+com.microsoft.nchwc;1;AveragePool,Conv,GlobalAveragePool,MaxPool,ReorderInput,ReorderOutput,Upsample
+```
+
+Name the regression explicitly: removing any required config entry must make the real reduction output lose an active kernel registration and fail the test. Do not merely grep the input configuration file.
+
+- [x] **Step 2: Apply the minimal reduced-operator correction**
+
+Add the two operator-domain entries above to `src/required_operators.config`. Do not disable graph optimization, disable NCHWc, replace the reduced build with a full ONNX Runtime build, change models, or change C++ inference code.
+
+- [x] **Step 3: Run the regression check in Windows CI**
+
+Run the new test after the existing `Generate reduced operators for ONNX Runtime` step and before ONNX Runtime configuration. Reuse the configured Python executable and existing generated `build_ort` tree. The step must be Windows-only because this remediation gates the Windows baseline and the PR currently uses the `windows-only-ci` quota label.
+
+- [x] **Step 4: Verify scope and hand off for review**
+
+Run the test green against ONNX Runtime `v1.28.0`, `git diff --check`, and focused configuration assertions. Confirm that no C++, model, Linux, or macOS runtime behaviour changed. Do not push; the controller owns the reviewed commit and external CI gate.
