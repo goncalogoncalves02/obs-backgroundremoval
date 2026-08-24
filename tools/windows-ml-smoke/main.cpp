@@ -53,8 +53,7 @@ void print_error(std::string_view message)
 	}
 
 	using RtlGetVersionFunction = LONG(WINAPI *)(PRTL_OSVERSIONINFOW);
-	const auto rtl_get_version =
-		reinterpret_cast<RtlGetVersionFunction>(GetProcAddress(ntdll, "RtlGetVersion"));
+	const auto rtl_get_version = reinterpret_cast<RtlGetVersionFunction>(GetProcAddress(ntdll, "RtlGetVersion"));
 	if (rtl_get_version == nullptr) {
 		error = "RtlGetVersion is unavailable; the native Windows version cannot be verified";
 		return std::nullopt;
@@ -146,9 +145,9 @@ int main(int argc, char **argv)
 		const auto input_shape = input_info.GetShape();
 		const auto output_shape = output_info.GetShape();
 		require(input_info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-		        "model input element type must be float");
+			"model input element type must be float");
 		require(output_info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-		        "model output element type must be float");
+			"model output element type must be float");
 		require(input_shape == kExpectedInputShape, "model input shape must be 1x144x256x3");
 		require(output_shape == kExpectedOutputShape, "model output shape must be 1x144x256x2");
 		require(input_info.GetElementCount() == kInputElementCount, "model input must contain 110592 values");
@@ -157,7 +156,7 @@ int main(int argc, char **argv)
 		std::vector<float> input_data(kInputElementCount, 0.0F);
 		const auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 		auto input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_data.data(), input_data.size(),
-		                                                   input_shape.data(), input_shape.size());
+								    input_shape.data(), input_shape.size());
 		const char *input_names[]{input_name.get()};
 		const char *output_names[]{output_name.get()};
 		const Ort::RunOptions run_options{nullptr};
@@ -173,16 +172,16 @@ int main(int argc, char **argv)
 		require(output_tensors.front().IsTensor(), "inference output must be a tensor");
 		const auto inference_output_info = output_tensors.front().GetTensorTypeAndShapeInfo();
 		require(inference_output_info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-		        "inference output element type must be float");
+			"inference output element type must be float");
 		require(inference_output_info.GetShape() == kExpectedOutputShape,
-		        "inference output shape must be 1x144x256x2");
+			"inference output shape must be 1x144x256x2");
 		require(inference_output_info.GetElementCount() == kOutputElementCount,
-		        "inference output must contain 73728 values");
+			"inference output must contain 73728 values");
 
 		const float *output_data = output_tensors.front().GetTensorData<float>();
-		const auto finite_output_count = static_cast<std::size_t>(
-			std::count_if(output_data, output_data + kOutputElementCount,
-			              [](float value) { return std::isfinite(value); }));
+		const auto finite_output_count =
+			static_cast<std::size_t>(std::count_if(output_data, output_data + kOutputElementCount,
+							       [](float value) { return std::isfinite(value); }));
 		require(finite_output_count == kOutputElementCount, "every inference output value must be finite");
 
 		std::cout << "provider=cpu\n";

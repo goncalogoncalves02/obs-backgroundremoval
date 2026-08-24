@@ -24,7 +24,8 @@ ParseResult parse_cli(std::span<const std::string_view> arguments)
 		}
 
 		if (index + 1 >= arguments.size()) {
-			const auto required = option == "--provider" ? "--provider cpu is required" : "--model <path> is required";
+			const auto required = option == "--provider" ? "--provider cpu is required"
+								     : "--model <path> is required";
 			return {.options = std::nullopt, .error = required};
 		}
 
@@ -42,7 +43,7 @@ ParseResult parse_cli(std::span<const std::string_view> arguments)
 	}
 	if (*provider != "cpu") {
 		return {.options = std::nullopt,
-		        .error = "unsupported provider: " + std::string(*provider) + " (only cpu is supported)"};
+			.error = "unsupported provider: " + std::string(*provider) + " (only cpu is supported)"};
 	}
 	if (!model_path.has_value() || model_path->empty()) {
 		return {.options = std::nullopt, .error = "--model <path> is required"};

@@ -33,26 +33,29 @@ int main()
 	using namespace std::string_view_literals;
 	using windows_ml_smoke::parse_cli;
 
-	constexpr std::array accepted_arguments{"--provider"sv, "cpu"sv, "--model"sv, "models/model with spaces.onnx"sv};
+	constexpr std::array accepted_arguments{"--provider"sv, "cpu"sv, "--model"sv,
+						"models/model with spaces.onnx"sv};
 	const auto accepted = parse_cli(accepted_arguments);
 	expect(accepted.ok(), "accepts --provider cpu --model <path>");
 	if (accepted.ok()) {
-		expect(accepted.options->model_path == "models/model with spaces.onnx", "preserves the exact model path");
+		expect(accepted.options->model_path == "models/model with spaces.onnx",
+		       "preserves the exact model path");
 	}
 
 	constexpr std::array missing_provider{"--model"sv, "model.onnx"sv};
 	constexpr std::array non_cpu_provider{"--provider"sv, "directml"sv, "--model"sv, "model.onnx"sv};
 	constexpr std::array missing_model{"--provider"sv, "cpu"sv};
-	constexpr std::array duplicate_provider{"--provider"sv, "cpu"sv, "--provider"sv, "cpu"sv, "--model"sv,
-	                                        "model.onnx"sv};
-	constexpr std::array duplicate_model{"--provider"sv, "cpu"sv, "--model"sv, "first.onnx"sv, "--model"sv,
-	                                     "second.onnx"sv};
-	constexpr std::array unknown_option{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv, "--iterations"sv,
-	                                    "1"sv};
+	constexpr std::array duplicate_provider{"--provider"sv, "cpu"sv,     "--provider"sv,
+						"cpu"sv,        "--model"sv, "model.onnx"sv};
+	constexpr std::array duplicate_model{"--provider"sv, "cpu"sv,     "--model"sv,
+					     "first.onnx"sv, "--model"sv, "second.onnx"sv};
+	constexpr std::array unknown_option{"--provider"sv, "cpu"sv,          "--model"sv,
+					    "model.onnx"sv, "--iterations"sv, "1"sv};
 
 	const std::array rejected_cases{
 		RejectedCase{"missing provider", missing_provider, "--provider cpu is required"},
-		RejectedCase{"non-CPU provider", non_cpu_provider, "unsupported provider: directml (only cpu is supported)"},
+		RejectedCase{"non-CPU provider", non_cpu_provider,
+			     "unsupported provider: directml (only cpu is supported)"},
 		RejectedCase{"missing model", missing_model, "--model <path> is required"},
 		RejectedCase{"duplicate provider", duplicate_provider, "duplicate option: --provider"},
 		RejectedCase{"duplicate model", duplicate_model, "duplicate option: --model"},
