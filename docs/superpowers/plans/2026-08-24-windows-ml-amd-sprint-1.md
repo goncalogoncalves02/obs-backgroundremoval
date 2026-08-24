@@ -19,7 +19,7 @@
 - Do not use `bin/build.bat` or `bin/setup.bat` as proof of the baseline: they reference a missing `windows` CMake preset, missing `scripts/BuildOBS.psm1` and `scripts/BuildOnnxRuntime.psm1`, and absent `*_git_commit` properties.
 - Do not push, create a pull request, add labels, publish artifacts, or alter external state. The controller owns those actions and must obtain user confirmation immediately before them.
 - Do not commit the baseline summary until Windows CI and manual OBS CPU evidence have both passed.
-- Each Windows-focused sprint blocks only on `Check CI`, the exact `build-windows-x64 / build` job succeeding for the tested commit, the intact Windows artifact, and its required manual Windows hardware test. The full cross-platform matrix may continue in the background and is required only before merge, release, or an explicitly shared cross-platform acceptance point.
+- Each Windows-focused sprint blocks only on `Check CI`, the exact `build-windows-x64 / build` job succeeding for the tested commit, the intact Windows artifact, and its required manual Windows hardware test. During the quota-conservation window, the `windows-only-ci` pull-request label skips macOS and Linux jobs; remove it before the full-matrix merge, release, or explicitly shared cross-platform acceptance point. Without the label, the full cross-platform matrix remains enabled.
 - Commits use only the user's configured Git identity and contain no assistant attribution or co-author trailer.
 - Preserve all changes in the original `GPU` worktree.
 
@@ -144,7 +144,7 @@ Create `.superpowers/windows-results/sprint-1/windows-baseline-handoff.md` with 
 ````markdown
 # Sprint 1 Windows baseline handoff
 
-Run this gate only after the controller confirms that the feature branch has been pushed, a draft pull request exists, the `upload-artifacts` label is present, and `Check CI` has passed. The per-sprint PR Check requirement is the exact `build-windows-x64 / build` job for this checkout; the overall PR Check run may remain in progress while other platform jobs continue.
+Run this gate only after the controller confirms that the feature branch has been pushed, a draft pull request exists, the `upload-artifacts` label is present, and `Check CI` has passed. During the quota-conservation window, `windows-only-ci` is also present to skip non-Windows jobs and must be removed before the full-matrix gate. The per-sprint PR Check requirement is the exact `build-windows-x64 / build` job for this checkout; the overall PR Check run may remain in progress while other platform jobs continue.
 
 ## 1. Prepare the Windows checkout
 

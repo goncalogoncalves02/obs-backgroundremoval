@@ -234,7 +234,7 @@ Temporary plans, subagent ledgers, review packages, and raw Windows logs live un
 
 CI validates compilation, CPU model loading, error handling, and packaging. It does not claim GPU success without target hardware.
 
-For each Windows-focused sprint, the blocking CI and acceptance gate is `Check CI`, a successful exact `build-windows-x64 / build` job for the tested commit, an intact Windows artifact from that run, and the required manual Windows hardware test. The aggregate cross-platform matrix may continue in GitHub in the background; it becomes blocking only before merge, release, or an explicitly shared cross-platform acceptance point. A successful Windows job is sufficient for the sprint even when the enclosing PR Check run remains in progress for non-Windows jobs.
+For each Windows-focused sprint, the blocking CI and acceptance gate is `Check CI`, a successful exact `build-windows-x64 / build` job for the tested commit, an intact Windows artifact from that run, and the required manual Windows hardware test. During the quota-conservation window, the `windows-only-ci` pull-request label skips macOS and Linux jobs; it must be removed before the full-matrix merge, release, or explicitly shared cross-platform acceptance gate. Without that label, the aggregate cross-platform matrix remains enabled. A successful Windows job is sufficient for the sprint even when the enclosing PR Check run remains in progress for non-Windows jobs.
 
 ## Git and collaboration policy
 
