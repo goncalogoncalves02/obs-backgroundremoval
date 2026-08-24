@@ -143,6 +143,12 @@ jobs:
             "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH" `
             "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION"
 
+          cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke_cli -G Ninja `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH" `
+            "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION" `
+            "-DWINDOWS_ML_SMOKE_CLI_TESTS_ONLY=ON"
+
       - name: Build Windows ML smoke tool (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         run: |
@@ -151,6 +157,7 @@ jobs:
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
           cmake --build build_windows_ml_smoke --target windows-ml-smoke --config Release --parallel
+          cmake --build build_windows_ml_smoke_cli --target windows-ml-smoke-cli-test --config Release --parallel
 
       - name: Test Windows ML smoke tool (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
@@ -161,10 +168,11 @@ jobs:
           $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
-          ctest --test-dir build_windows_ml_smoke --output-on-failure
+          ctest --test-dir build_windows_ml_smoke_cli --output-on-failure
           $env:WINDOWS_ML_SMOKE_EXE = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke') 'windows-ml-smoke.exe'
           $env:WINDOWS_ML_SMOKE_MODEL = Join-Path $env:GITHUB_WORKSPACE 'data\models\mediapipe.onnx'
           & $env:PYTHON_COMMAND tests/WindowsMlSmoke/test_windows_ml_smoke.py
+          & $env:WINDOWS_ML_SMOKE_EXE --provider cpu --model $env:WINDOWS_ML_SMOKE_MODEL
 
       - name: Configure OBS Studio (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
