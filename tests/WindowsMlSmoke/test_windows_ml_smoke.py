@@ -49,8 +49,59 @@ class WindowsMlSmokeTest(unittest.TestCase):
                 self.assertEqual(
                     result.stderr,
                     f"error={expected_error}\n"
-                    "usage=windows-ml-smoke --provider cpu --model <path>\n",
+                    "usage=windows-ml-smoke (--provider cpu --model <path> | "
+                    "--list-providers | --prepare-provider <exact-provider-name>)\n",
                 )
+
+    def test_lists_providers_without_mutating_the_catalog(self):
+        result = self._run("--list-providers")
+
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertEqual(result.stderr, "")
+        output_lines = result.stdout.splitlines()
+        self.assertTrue(output_lines)
+        self.assertEqual(output_lines[-1], "status=ok")
+
+        report = self._parse_report(result.stdout)
+        self.assertEqual(report["operation"], "list-providers")
+        self.assertEqual(report["status"], "ok")
+        provider_count = int(report["provider_count"])
+        expected_keys = {"operation", "provider_count", "status"}
+        provider_fields = {
+            "name",
+            "version",
+            "ready_state",
+            "certification",
+            "package_family_name",
+            "library_path",
+            "package_root_path",
+        }
+        for index in range(provider_count):
+            expected_keys.update(f"provider.{index}.{field}" for field in provider_fields)
+            self.assertTrue(report[f"provider.{index}.name"])
+        self.assertEqual(set(report), expected_keys)
+
+    def test_missing_provider_is_controlled_and_cannot_trigger_acquisition(self):
+        result = self._run(
+            "--prepare-provider", "__obs_backgroundremoval_missing_provider__"
+        )
+
+        self.assertEqual(result.returncode, 5, self._diagnostic(result))
+        output_lines = result.stdout.splitlines()
+        self.assertTrue(output_lines)
+        self.assertEqual(output_lines[-1], "status=unavailable")
+        report = self._parse_report(result.stdout)
+        self.assertEqual(report["operation"], "prepare-provider")
+        self.assertEqual(
+            report["requested_provider_name"],
+            "__obs_backgroundremoval_missing_provider__",
+        )
+        self.assertEqual(report["provider_found"], "false")
+        self.assertEqual(report["registration_succeeded"], "false")
+        self.assertEqual(report["device_count"], "0")
+        self.assertEqual(report["matching_device_count"], "0")
+        self.assertEqual(report["status"], "unavailable")
+        self.assertRegex(result.stderr, r"^error=[^\r\n]+\n$")
 
     def test_runs_the_tracked_mediapipe_contract_once_on_cpu(self):
         result = self._run("--provider", "cpu", "--model", self.model_argument)

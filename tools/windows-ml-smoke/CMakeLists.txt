@@ -15,9 +15,7 @@ add_library(windows-ml-smoke-provider-report STATIC provider-report.cpp)
 target_compile_features(windows-ml-smoke-provider-report PUBLIC cxx_std_20)
 target_include_directories(
   windows-ml-smoke-provider-report
-  PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/ort-utils"
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../src/ort-utils"
 )
 
 if(WINDOWS_ML_SMOKE_CLI_TESTS_ONLY)
@@ -40,28 +38,19 @@ endif()
 
 find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
 
-add_executable(
-  windows-ml-smoke
-  main.cpp
-  ../../src/ort-utils/windows-ml-provider.cpp
-)
+add_executable(windows-ml-smoke main.cpp ../../src/ort-utils/windows-ml-provider.cpp)
 target_compile_features(windows-ml-smoke PRIVATE cxx_std_20)
 target_compile_definitions(windows-ml-smoke PRIVATE WINDOWS_ML_PACKAGE_VERSION="2.2.12")
 target_include_directories(windows-ml-smoke PRIVATE ../../src/ort-utils)
 target_link_libraries(
   windows-ml-smoke
-  PRIVATE
-    windows-ml-smoke-cli
-    windows-ml-smoke-provider-report
-    WindowsML::Api
-    WindowsML::OnnxRuntime
+  PRIVATE windows-ml-smoke-cli windows-ml-smoke-provider-report WindowsML::Api WindowsML::OnnxRuntime
 )
 
 add_custom_command(
   TARGET windows-ml-smoke
   POST_BUILD
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          $<TARGET_RUNTIME_DLLS:windows-ml-smoke>
-          $<TARGET_FILE_DIR:windows-ml-smoke>
+  COMMAND
+    "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:windows-ml-smoke> $<TARGET_FILE_DIR:windows-ml-smoke>
   COMMAND_EXPAND_LISTS
 )
