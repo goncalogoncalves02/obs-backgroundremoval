@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <string>
+#include <string_view>
+
 namespace windows_ml {
 
 enum class ProviderReadyState {
@@ -19,5 +22,8 @@ enum class ProviderActivationAction {
 };
 
 [[nodiscard]] ProviderActivationAction activation_action(ProviderReadyState ready_state) noexcept;
+
+void assign_sanitized_diagnostic(std::string &destination, std::string_view first, std::string_view second = {},
+				 std::string_view third = {}) noexcept;
 
 } // namespace windows_ml

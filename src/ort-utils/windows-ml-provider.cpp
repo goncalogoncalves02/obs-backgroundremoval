@@ -38,6 +38,29 @@ private:
 	WinMLEpCatalogHandle handle_{};
 };
 
+class CatalogHresultFailure {
+public:
+	CatalogHresultFailure(HRESULT hresult, std::string_view first, std::string_view second = {},
+			      std::string_view third = {}) noexcept
+		: hresult_(hresult),
+		  first_(first),
+		  second_(second),
+		  third_(third)
+	{
+	}
+
+	[[nodiscard]] HRESULT hresult() const noexcept { return hresult_; }
+	[[nodiscard]] std::string_view first() const noexcept { return first_; }
+	[[nodiscard]] std::string_view second() const noexcept { return second_; }
+	[[nodiscard]] std::string_view third() const noexcept { return third_; }
+
+private:
+	HRESULT hresult_;
+	std::string_view first_;
+	std::string_view second_;
+	std::string_view third_;
+};
+
 [[nodiscard]] std::string copy_optional_string(const char *value)
 {
 	return value == nullptr ? std::string{} : std::string(value);
@@ -124,22 +147,19 @@ private:
 	return message;
 }
 
-[[nodiscard]] std::string sanitize_error(std::string_view error)
-{
-	std::string sanitized(error);
-	std::replace_if(
-		sanitized.begin(), sanitized.end(),
-		[](char character) { return character == '\r' || character == '\n'; }, ' ');
-	return sanitized;
-}
-
-template<typename Result> void set_hresult_error(Result &result, HRESULT hresult, std::string_view context)
+template<typename Result>
+void set_hresult_error(Result &result, HRESULT hresult, std::string_view first, std::string_view second = {},
+		       std::string_view third = {}) noexcept
 {
 	result.error_hresult = static_cast<std::uint32_t>(hresult);
-	result.error = sanitize_error(context);
-	const auto system_message = system_hresult_message(hresult);
-	if (!system_message.empty()) {
-		result.error += ": " + sanitize_error(system_message);
+	assign_sanitized_diagnostic(result.error, first, second, third);
+	try {
+		const auto system_message = system_hresult_message(hresult);
+		if (!system_message.empty()) {
+			assign_sanitized_diagnostic(result.error, result.error, ": ", system_message);
+		}
+	} catch (...) {
+		// Keep the best diagnostic that the no-throw assignment stored above.
 	}
 }
 
@@ -184,7 +204,7 @@ template<typename SizeFunction, typename CopyFunction>
 	size_t size = 0;
 	HRESULT result = size_function(provider, &size);
 	if (FAILED(result)) {
-		throw std::runtime_error(std::string("failed to read provider ") + std::string(field_name) + " size");
+		throw CatalogHresultFailure(result, "failed to read provider ", field_name, " size");
 	}
 	if (size == 0) {
 		return {};
@@ -194,7 +214,7 @@ template<typename SizeFunction, typename CopyFunction>
 	size_t used = 0;
 	result = copy_function(provider, value.size(), value.data(), &used);
 	if (FAILED(result)) {
-		throw std::runtime_error(std::string("failed to read provider ") + std::string(field_name));
+		throw CatalogHresultFailure(result, "failed to read provider ", field_name);
 	}
 	if (used > value.size()) {
 		throw std::runtime_error(std::string("provider ") + std::string(field_name) + " length is invalid");
@@ -399,6 +419,8 @@ ProviderPreparationResult prepare_provider(Ort::Env &environment, std::string_vi
 		}
 
 		result.succeeded = true;
+	} catch (const CatalogHresultFailure &failure) {
+		set_hresult_error(result, failure.hresult(), failure.first(), failure.second(), failure.third());
 	} catch (const Ort::Exception &exception) {
 		result.error = std::string("ONNX Runtime provider failure: ") + exception.what();
 	} catch (const std::exception &exception) {
@@ -413,8 +435,8 @@ ProviderSessionResult configure_provider_session(Ort::Env &environment, Ort::Ses
 						 std::string_view exact_provider_name) noexcept
 {
 	ProviderSessionResult result;
-	result.requested_provider_name = exact_provider_name;
 	try {
+		result.requested_provider_name = exact_provider_name;
 		if (attach_existing_amd_gpu_device(environment, session_options, exact_provider_name, result)) {
 			return result;
 		}
@@ -430,11 +452,13 @@ ProviderSessionResult configure_provider_session(Ort::Env &environment, Ort::Ses
 		WinMLEpHandle provider = nullptr;
 		const HRESULT find_result = WinMLEpCatalogFindProvider(
 			catalog.get(), result.requested_provider_name.c_str(), nullptr, &provider);
-		if (FAILED(find_result) || provider == nullptr) {
-			result.error = "provider not found: " + result.requested_provider_name;
-			if (FAILED(find_result)) {
-				set_hresult_error(result, find_result, result.error);
-			}
+		if (FAILED(find_result)) {
+			set_hresult_error(result, find_result, "provider not found: ", result.requested_provider_name);
+			return result;
+		}
+		if (provider == nullptr) {
+			assign_sanitized_diagnostic(result.error,
+						    "provider not found: ", result.requested_provider_name);
 			return result;
 		}
 
@@ -497,14 +521,16 @@ ProviderSessionResult configure_provider_session(Ort::Env &environment, Ort::Ses
 			result.error = "registered provider has no exact-name AMD GPU ONNX Runtime EP device";
 			return result;
 		}
+	} catch (const CatalogHresultFailure &failure) {
+		set_hresult_error(result, failure.hresult(), failure.first(), failure.second(), failure.third());
 	} catch (HRESULT hresult) {
 		set_hresult_error(result, hresult, "Windows ML provider configuration failed");
 	} catch (const Ort::Exception &exception) {
-		result.error = sanitize_error(std::string("ONNX Runtime provider failure: ") + exception.what());
+		assign_sanitized_diagnostic(result.error, "ONNX Runtime provider failure: ", exception.what());
 	} catch (const std::exception &exception) {
-		result.error = sanitize_error(exception.what());
+		assign_sanitized_diagnostic(result.error, exception.what());
 	} catch (...) {
-		result.error = "unknown failure while configuring the Windows ML provider";
+		assign_sanitized_diagnostic(result.error, "unknown failure while configuring the Windows ML provider");
 	}
 	return result;
 }
