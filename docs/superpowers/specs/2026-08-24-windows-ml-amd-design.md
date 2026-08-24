@@ -52,13 +52,15 @@ The module owns:
 
 The module does not own:
 
-- provider downloads initiated by the OBS plugin;
+- provider downloads or installation initiated by the OBS plugin;
 - OBS logging or UI widgets;
 - model loading policy;
 - image preprocessing or mask postprocessing;
 - session fallback policy.
 
-Provider preparation is exposed separately for the smoke tool. The OBS plugin never calls provider preparation and never performs network or package acquisition while loading a filter, opening properties, or running inference.
+Provider acquisition is exposed separately through the smoke tool and is allowed only when the catalog reports `NotPresent`. The OBS plugin never calls `WinMLEpEnsureReady` for a `NotPresent` provider and never performs network or package acquisition while loading a filter, opening properties, or running inference.
+
+Windows ML readiness is process-specific. A provider that is installed system-wide can report `NotReady` in a new process because it has not yet been added to that process's package dependency graph. For `NotReady` only, both the smoke inference command and the OBS plugin may call `WinMLEpEnsureReady` to activate the already-installed provider in the current process. They must re-read the ready state and proceed only if it becomes `Ready`. This state-gated activation is distinct from the explicit `NotPresent` acquisition path.
 
 ### Windows ML smoke tool
 
@@ -106,7 +108,7 @@ Provider handling is split into three operations:
 discover -> register -> attach to SessionOptions
 ```
 
-Preparation is an explicit smoke-tool-only operation that precedes those three operations when a provider is not ready.
+Acquisition of a `NotPresent` provider is an explicit smoke-tool-only operation. Activation of an already-installed `NotReady` provider is performed in each consumer process before registration because dependency-graph readiness does not persist across processes.
 
 Each session tracks four distinct values:
 
@@ -120,11 +122,13 @@ fallback_reason
 For a requested Windows GPU provider:
 
 1. Discover the provider and inspect its ready state without preparing it.
-2. Register the ready provider library with the filter's `Ort::Env`.
-3. Enumerate compatible EP devices and select the intended device.
-4. Attach that device to a new `Ort::SessionOptions`.
-5. Create the existing `Ort::Session` with the exact plugin model.
-6. Record and log the effective provider and device.
+2. If the provider is `NotPresent`, do not call `WinMLEpEnsureReady`; report it as unavailable and follow the CPU fallback path.
+3. If the provider is `NotReady`, call `WinMLEpEnsureReady` only to add the already-installed package to the current process dependency graph, then require the state to become `Ready`.
+4. Register the ready provider library with the filter's `Ort::Env`.
+5. Enumerate compatible EP devices and select the intended device.
+6. Attach that device to a new `Ort::SessionOptions`.
+7. Create the existing `Ort::Session` with the exact plugin model.
+8. Record and log the effective provider and device.
 
 Provider catalog metadata may be cached to avoid repeated discovery from UI paths. Registration remains associated with the `Ort::Env` that owns the session.
 
@@ -232,7 +236,7 @@ No Windows/GPU sprint is complete solely because code compiles. Hardware-depende
 
 Approved specifications and implementation plans intended for durable review may be committed under `docs/superpowers/`. Temporary ledgers, briefs, reports, review packages, and raw Windows logs live under the ignored `.superpowers/` directory. Permanent user-facing evidence is committed only to the relevant documentation files.
 
-CI validates compilation, CPU model loading, error handling, and packaging. It does not claim GPU success without target hardware.
+CI validates compilation, CPU model loading, error handling, and packaging. It must also prove with fakes or portable policy tests that `NotPresent` never reaches `WinMLEpEnsureReady`, while `NotReady` may activate only an already-installed provider. CI does not claim GPU success without target hardware.
 
 For each Windows-focused sprint, the blocking CI and acceptance gate is `Check CI`, a successful exact `build-windows-x64 / build` job for the tested commit, an intact Windows artifact from that run, and the required manual Windows hardware test. During the quota-conservation window, the `windows-only-ci` pull-request label skips macOS and Linux jobs; it must be removed before the full-matrix merge, release, or explicitly shared cross-platform acceptance gate. Without that label, the aggregate cross-platform matrix remains enabled. A successful Windows job is sufficient for the sprint even when the enclosing PR Check run remains in progress for non-Windows jobs.
 
