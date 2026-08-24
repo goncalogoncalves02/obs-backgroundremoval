@@ -186,16 +186,56 @@ jobs:
           SMOKE_TOOL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
         run: |
           $SMOKE_BUILD_DIR = Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke'
+          $SMOKE_MODEL_PATH = Join-Path $env:GITHUB_WORKSPACE 'data\models\mediapipe.onnx'
           $SMOKE_STAGE_DIR = Join-Path '${{ steps.job-temp.outputs.JOB_TEMP }}' 'windows-ml-smoke'
+          $SMOKE_ARCHIVE_PATH = Join-Path $env:GITHUB_WORKSPACE $env:SMOKE_TOOL_ARTIFACT_NAME
           New-Item -Path $SMOKE_STAGE_DIR -ItemType Directory -Force
           Copy-Item -LiteralPath (Join-Path $SMOKE_BUILD_DIR 'windows-ml-smoke.exe') -Destination $SMOKE_STAGE_DIR
+          Copy-Item -LiteralPath $SMOKE_MODEL_PATH -Destination $SMOKE_STAGE_DIR
           $RUNTIME_DLLS = @(Get-ChildItem -LiteralPath $SMOKE_BUILD_DIR -Filter '*.dll' -File)
           if ($RUNTIME_DLLS.Count -eq 0) {
             throw 'The Windows ML smoke tool has no adjacent runtime DLLs to package.'
           }
           $RUNTIME_DLLS | Copy-Item -Destination $SMOKE_STAGE_DIR
-          Compress-Archive -Path (Join-Path $SMOKE_STAGE_DIR '*') `
-            -DestinationPath (Join-Path $env:GITHUB_WORKSPACE $env:SMOKE_TOOL_ARTIFACT_NAME)
+
+          $STAGED_FILES = @(Get-ChildItem -LiteralPath $SMOKE_STAGE_DIR -File)
+          $STAGED_EXECUTABLES = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.exe' })
+          $STAGED_MODELS = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.onnx' })
+          $STAGED_DLLS = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.dll' })
+          if ($STAGED_EXECUTABLES.Count -ne 1 -or $STAGED_EXECUTABLES[0].Name -cne 'windows-ml-smoke.exe') {
+            throw "The Windows ML smoke staging directory must contain exactly one windows-ml-smoke.exe; found $($STAGED_EXECUTABLES.Count)."
+          }
+          if ($STAGED_MODELS.Count -ne 1 -or $STAGED_MODELS[0].Name -cne 'mediapipe.onnx') {
+            throw "The Windows ML smoke staging directory must contain exactly one mediapipe.onnx; found $($STAGED_MODELS.Count)."
+          }
+          if ($STAGED_DLLS.Count -eq 0) {
+            throw 'The Windows ML smoke staging directory must contain at least one adjacent runtime DLL.'
+          }
+
+          Compress-Archive -LiteralPath $STAGED_FILES.FullName -DestinationPath $SMOKE_ARCHIVE_PATH
+
+          $SMOKE_ARCHIVE = [System.IO.Compression.ZipFile]::OpenRead($SMOKE_ARCHIVE_PATH)
+          try {
+            $ZIP_FILE_ENTRIES = @($SMOKE_ARCHIVE.Entries | Where-Object { -not [string]::IsNullOrEmpty($_.Name) })
+            $ZIP_EXECUTABLE_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.exe' })
+            $ZIP_MODEL_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.onnx' })
+            $ZIP_DLL_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.dll' })
+            if ($ZIP_EXECUTABLE_ENTRIES.Count -ne 1 -or
+                $ZIP_EXECUTABLE_ENTRIES[0].FullName -cne 'windows-ml-smoke.exe') {
+              throw "The Windows ML smoke ZIP must contain exactly one root windows-ml-smoke.exe entry; found $($ZIP_EXECUTABLE_ENTRIES.Count)."
+            }
+            if ($ZIP_MODEL_ENTRIES.Count -ne 1 -or $ZIP_MODEL_ENTRIES[0].FullName -cne 'mediapipe.onnx') {
+              throw "The Windows ML smoke ZIP must contain exactly one root mediapipe.onnx entry; found $($ZIP_MODEL_ENTRIES.Count)."
+            }
+            if ($ZIP_DLL_ENTRIES.Count -eq 0) {
+              throw 'The Windows ML smoke ZIP must contain at least one runtime DLL entry.'
+            }
+            if (@($ZIP_DLL_ENTRIES | Where-Object { $_.FullName -cne $_.Name }).Count -ne 0) {
+              throw 'Every Windows ML smoke runtime DLL must be adjacent to the executable in the ZIP root.'
+            }
+          } finally {
+            $SMOKE_ARCHIVE.Dispose()
+          }
 
       - name: Attest Windows ML smoke-tool artifact
         if: inputs.upload-artifacts && inputs.attest-artifacts
