@@ -21,3 +21,11 @@ SPDX-License-Identifier = "Apache-2.0"
 path = ["data/locale/*.ini"]
 SPDX-FileCopyrightText = ""
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = [
+  "docs/superpowers/plans/2026-08-24-windows-ml-amd-sprint-1.md",
+  "docs/superpowers/specs/2026-08-24-windows-ml-amd-design.md",
+]
+SPDX-FileCopyrightText = ""
+SPDX-License-Identifier = "GPL-3.0-or-later"
