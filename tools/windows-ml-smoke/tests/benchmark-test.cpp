@@ -24,8 +24,7 @@ void expect(bool condition, std::string_view message)
 	}
 }
 
-template<typename Function>
-void expect_invalid_argument(Function &&function, std::string_view message)
+template<typename Function> void expect_invalid_argument(Function &&function, std::string_view message)
 {
 	try {
 		function();
@@ -41,6 +40,7 @@ void expect_invalid_argument(Function &&function, std::string_view message)
 int main()
 {
 	using windows_ml_smoke::compare_outputs;
+	using windows_ml_smoke::calculate_speedup_ratio;
 	using windows_ml_smoke::make_deterministic_input;
 	using windows_ml_smoke::summarize_latencies;
 
@@ -48,7 +48,7 @@ int main()
 	const auto first_input = make_deterministic_input(8);
 	const auto second_input = make_deterministic_input(8);
 	constexpr std::array expected_input{0.682725887F, 0.875184648F, 0.062029365F, 0.441263046F,
-						      0.804730225F, 0.419035400F, 0.150124320F, 0.031266632F};
+					    0.804730225F, 0.419035400F, 0.150124320F, 0.031266632F};
 	expect(first_input.size() == expected_input.size(), "generates the requested number of input values");
 	expect(first_input == second_input, "generates byte-identical input on repeated calls");
 	for (std::size_t index = 0; index < first_input.size(); ++index) {
@@ -67,8 +67,15 @@ int main()
 	expect(latencies == std::vector<double>({4.0, 1.0, 3.0, 2.0}), "does not mutate caller latency order");
 	const std::vector<double> empty_latencies;
 	const std::vector<double> non_finite_latencies{1.0, std::numeric_limits<double>::infinity()};
-	expect_invalid_argument([&] { static_cast<void>(summarize_latencies(empty_latencies)); }, "rejects empty latency input");
-	expect_invalid_argument([&] { static_cast<void>(summarize_latencies(non_finite_latencies)); }, "rejects non-finite latency input");
+	expect_invalid_argument([&] { static_cast<void>(summarize_latencies(empty_latencies)); },
+				"rejects empty latency input");
+	expect_invalid_argument([&] { static_cast<void>(summarize_latencies(non_finite_latencies)); },
+				"rejects non-finite latency input");
+
+	// Catches: dividing by a zero candidate average and formatting inf/nan as a benchmark result.
+	expect(calculate_speedup_ratio(2.5, 1.25) == 2.0, "calculates CPU-to-candidate speedup");
+	expect_invalid_argument([&] { static_cast<void>(calculate_speedup_ratio(2.5, 0.0)); },
+				"rejects a zero candidate average before division");
 
 	// Catches: MAE restricted to foreground, wrong foreground channel, or incorrect thresholded IoU counts.
 	constexpr std::array cpu_output{0.9F, 0.1F, 0.4F, 0.6F, 0.8F, 0.2F, 0.3F, 0.7F};
@@ -88,11 +95,17 @@ int main()
 	// Catches: accepting structurally invalid or NaN/inf output comparisons.
 	constexpr std::array shorter_output{0.9F, 0.1F};
 	const std::array non_finite_output{0.9F, std::numeric_limits<float>::quiet_NaN()};
-	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, shorter_output, 1, 2, 0.5F)); }, "rejects output size mismatch");
-	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, cpu_output, 2, 2, 0.5F)); }, "rejects a foreground channel outside the channel count");
-	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, cpu_output, 0, 0, 0.5F)); }, "rejects a zero channel count");
-	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, shorter_output, 0, 3, 0.5F)); }, "rejects output sizes not divisible by the channel count");
-	expect_invalid_argument([&] { static_cast<void>(compare_outputs(non_finite_output, non_finite_output, 1, 2, 0.5F)); }, "rejects non-finite output values");
+	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, shorter_output, 1, 2, 0.5F)); },
+				"rejects output size mismatch");
+	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, cpu_output, 2, 2, 0.5F)); },
+				"rejects a foreground channel outside the channel count");
+	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, cpu_output, 0, 0, 0.5F)); },
+				"rejects a zero channel count");
+	expect_invalid_argument([&] { static_cast<void>(compare_outputs(cpu_output, shorter_output, 0, 3, 0.5F)); },
+				"rejects output sizes not divisible by the channel count");
+	expect_invalid_argument(
+		[&] { static_cast<void>(compare_outputs(non_finite_output, non_finite_output, 1, 2, 0.5F)); },
+		"rejects non-finite output values");
 
 	if (failures != 0) {
 		std::cerr << failures << " assertion(s) failed\n";

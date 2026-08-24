@@ -134,6 +134,8 @@ int main()
 		     "error=provider not  found\n"
 		     "status=unavailable\n",
 		     "provider failures must remain single-line unavailable reports with status last");
+	expect_equal(windows_ml_smoke::inference_exit_code(unavailable), 5,
+		     "provider-boundary failures must not be classified as ordinary inference failures");
 
 	windows_ml_smoke::ComparisonResult comparison;
 	comparison.cpu = inference;

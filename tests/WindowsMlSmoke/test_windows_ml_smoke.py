@@ -199,6 +199,36 @@ class WindowsMlSmokeTest(unittest.TestCase):
         self.assertEqual(tuple(report)[-1], "status")
         self.assertEqual(report["status"], "ok")
 
+    def test_cpu_side_comparison_failure_preserves_candidate_diagnostics(self):
+        missing_model = self.model.parent / "__obs_backgroundremoval_missing_model__.onnx"
+        self.assertFalse(missing_model.exists())
+
+        result = self._run(
+            "--compare",
+            "cpu",
+            "MIGraphXExecutionProvider",
+            "--model",
+            str(missing_model),
+            "--iterations",
+            "3",
+        )
+
+        self.assertEqual(result.returncode, 4, self._diagnostic(result))
+        report = self._parse_report(result.stdout)
+        self.assertEqual(report["operation"], "comparison")
+        self.assertEqual(report["baseline_provider"], "cpu")
+        self.assertEqual(report["requested_provider"], "MIGraphXExecutionProvider")
+        self.assertEqual(report["effective_provider"], "")
+        self.assertEqual(report["process_activation_attempted"], "false")
+        self.assertEqual(report["provider_registration_succeeded"], "false")
+        self.assertEqual(report["selected_ep_name"], "")
+        self.assertEqual(report["selected_device_id"], "")
+        self.assertEqual(report["warmup_iterations"], "10")
+        self.assertEqual(report["iterations"], "3")
+        self.assertEqual(tuple(report)[-1], "status")
+        self.assertEqual(report["status"], "failed")
+        self.assertRegex(result.stderr, r"^error=[^\r\n]+\n$")
+
     @classmethod
     def _run(cls, *arguments):
         return subprocess.run(

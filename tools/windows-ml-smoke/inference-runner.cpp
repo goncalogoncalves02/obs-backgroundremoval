@@ -83,14 +83,29 @@ InferenceResult run_inference(std::string_view model_path, std::string_view prov
 		session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
 		if (provider_name != "cpu") {
-			const auto provider =
-				windows_ml::configure_provider_session(environment, session_options, provider_name);
-			copy_provider_diagnostics(result, provider);
-			if (!provider.succeeded) {
-				result.provider_failure = true;
-				if (result.error.empty()) {
-					result.error = "provider configuration failed without a diagnostic";
+			try {
+				const auto provider = windows_ml::configure_provider_session(
+					environment, session_options, provider_name);
+				copy_provider_diagnostics(result, provider);
+				if (!provider.succeeded) {
+					result.provider_failure = true;
+					if (result.error.empty()) {
+						result.error = "provider configuration failed without a diagnostic";
+					}
+					return result;
 				}
+			} catch (const Ort::Exception &exception) {
+				result.provider_failure = true;
+				result.error =
+					std::string("ONNX Runtime provider configuration failure: ") + exception.what();
+				return result;
+			} catch (const std::exception &exception) {
+				result.provider_failure = true;
+				result.error = std::string("provider configuration failure: ") + exception.what();
+				return result;
+			} catch (...) {
+				result.provider_failure = true;
+				result.error = "unknown failure while configuring the ONNX Runtime provider";
 				return result;
 			}
 		}
@@ -179,6 +194,10 @@ ComparisonResult run_comparison(std::string_view model_path, std::string_view ca
 				std::size_t iterations, std::span<const float> deterministic_input)
 {
 	ComparisonResult result;
+	result.candidate.requested_provider = candidate_provider_name;
+	result.candidate.model_path = model_path;
+	result.candidate.warmup_iterations = kBenchmarkWarmupIterations;
+	result.candidate.iterations = iterations;
 	result.cpu = run_inference(model_path, "cpu", iterations, true, deterministic_input);
 	if (!result.cpu.succeeded) {
 		result.error_hresult = result.cpu.error_hresult;
@@ -196,10 +215,11 @@ ComparisonResult run_comparison(std::string_view model_path, std::string_view ca
 	try {
 		result.comparison = compare_outputs(result.cpu.output, result.candidate.output, kForegroundChannel,
 						    kChannelCount, kForegroundThreshold);
-		result.speedup_ratio = result.cpu.latency.average_ms / result.candidate.latency.average_ms;
 		result.mae_gate_passed = result.comparison.mean_absolute_error <= kMaximumMeanAbsoluteError;
 		result.iou_gate_passed = result.comparison.foreground_iou >= kMinimumForegroundIou;
 		result.performance_gate_passed = result.candidate.latency.average_ms < result.cpu.latency.average_ms;
+		result.speedup_ratio =
+			calculate_speedup_ratio(result.cpu.latency.average_ms, result.candidate.latency.average_ms);
 		result.succeeded = result.mae_gate_passed && result.iou_gate_passed && result.performance_gate_passed;
 		if (!result.succeeded) {
 			result.error = "inference comparison did not satisfy every correctness and performance gate";
