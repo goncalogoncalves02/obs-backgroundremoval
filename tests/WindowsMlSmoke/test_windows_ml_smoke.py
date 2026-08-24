@@ -57,6 +57,9 @@ class WindowsMlSmokeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, self._diagnostic(result))
         self.assertEqual(result.stderr, "")
+        output_lines = result.stdout.splitlines()
+        self.assertTrue(output_lines)
+        self.assertEqual(output_lines[-1], "status=ok")
         report = self._parse_report(result.stdout)
         self.assertEqual(
             set(report),

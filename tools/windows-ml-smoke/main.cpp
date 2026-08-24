@@ -185,7 +185,6 @@ int main(int argc, char **argv)
 			              [](float value) { return std::isfinite(value); }));
 		require(finite_output_count == kOutputElementCount, "every inference output value must be finite");
 
-		std::cout << "status=ok\n";
 		std::cout << "provider=cpu\n";
 		std::cout << "architecture=x64\n";
 		std::cout << "windows_version=" << *windows_version << '\n';
@@ -203,6 +202,7 @@ int main(int argc, char **argv)
 		std::cout << "iterations=1\n";
 		std::cout << "finite_output_count=" << finite_output_count << '\n';
 		std::cout << "latency_ms=" << std::fixed << std::setprecision(6) << latency_ms << '\n';
+		std::cout << "status=ok\n";
 		return kSuccessExitCode;
 	} catch (const Ort::Exception &exception) {
 		print_error(std::string("ONNX Runtime failure: ") + exception.what());
