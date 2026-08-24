@@ -49,15 +49,15 @@ int main()
 	}
 
 	// Catches: dropped explicit provider spelling or benchmark iteration counts.
-	constexpr std::array cpu_benchmark{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv, "--iterations"sv,
-							    "100"sv};
-	constexpr std::array migraphx_benchmark{"--provider"sv, "MIGraphXExecutionProvider"sv, "--model"sv,
-								 "model.onnx"sv, "--iterations"sv, "100"sv};
-	constexpr std::array dml_benchmark{"--provider"sv, "DmlExecutionProvider"sv, "--model"sv, "model.onnx"sv,
-								"--iterations"sv, "100"sv};
-	for (const auto &arguments : {std::span<const std::string_view>(cpu_benchmark),
-						    std::span<const std::string_view>(migraphx_benchmark),
-						    std::span<const std::string_view>(dml_benchmark)}) {
+	constexpr std::array cpu_benchmark{"--provider"sv, "cpu"sv,          "--model"sv,
+					   "model.onnx"sv, "--iterations"sv, "100"sv};
+	constexpr std::array migraphx_benchmark{
+		"--provider"sv, "MIGraphXExecutionProvider"sv, "--model"sv, "model.onnx"sv, "--iterations"sv, "100"sv};
+	constexpr std::array dml_benchmark{"--provider"sv, "DmlExecutionProvider"sv, "--model"sv,
+					   "model.onnx"sv, "--iterations"sv,         "100"sv};
+	for (const auto &arguments :
+	     {std::span<const std::string_view>(cpu_benchmark), std::span<const std::string_view>(migraphx_benchmark),
+	      std::span<const std::string_view>(dml_benchmark)}) {
 		const auto benchmark = parse_cli(arguments);
 		expect(benchmark.ok(), "accepts an explicit provider benchmark");
 		if (benchmark.ok()) {
@@ -75,18 +75,21 @@ int main()
 	       "preserves the exact DirectML provider spelling");
 
 	// Catches: accepting a non-CPU baseline or losing the requested comparison candidate.
-	constexpr std::array migraphx_compare{"--compare"sv, "cpu"sv, "MIGraphXExecutionProvider"sv, "--model"sv,
-								  "model.onnx"sv, "--iterations"sv, "100"sv};
-	constexpr std::array dml_compare{"--compare"sv, "cpu"sv, "DmlExecutionProvider"sv, "--model"sv,
-							  "model.onnx"sv, "--iterations"sv, "100"sv};
-	for (const auto &arguments : {std::span<const std::string_view>(migraphx_compare),
-						    std::span<const std::string_view>(dml_compare)}) {
+	constexpr std::array migraphx_compare{"--compare"sv, "cpu"sv,        "MIGraphXExecutionProvider"sv,
+					      "--model"sv,   "model.onnx"sv, "--iterations"sv,
+					      "100"sv};
+	constexpr std::array dml_compare{"--compare"sv, "cpu"sv,        "DmlExecutionProvider"sv,
+					 "--model"sv,   "model.onnx"sv, "--iterations"sv,
+					 "100"sv};
+	for (const auto &arguments :
+	     {std::span<const std::string_view>(migraphx_compare), std::span<const std::string_view>(dml_compare)}) {
 		const auto comparison = parse_cli(arguments);
 		expect(comparison.ok(), "accepts a CPU-to-provider comparison");
 		if (comparison.ok()) {
 			expect(comparison.options->command == CliCommand::Compare, "selects the comparison command");
 			expect(comparison.options->provider_name == "cpu", "preserves the CPU comparison baseline");
-			expect(!comparison.options->comparison_provider_name.empty(), "preserves the comparison candidate");
+			expect(!comparison.options->comparison_provider_name.empty(),
+			       "preserves the comparison candidate");
 			expect(comparison.options->iterations == 100, "preserves comparison iterations");
 			expect(comparison.options->benchmark_requested, "marks comparisons as benchmarks");
 		}
@@ -124,33 +127,34 @@ int main()
 						"cpu"sv,        "--model"sv, "model.onnx"sv};
 	constexpr std::array duplicate_model{"--provider"sv, "cpu"sv,     "--model"sv,
 					     "first.onnx"sv, "--model"sv, "second.onnx"sv};
-	constexpr std::array zero_iterations{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv, "--iterations"sv,
-							     "0"sv};
-	constexpr std::array negative_iterations{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv,
-								 "--iterations"sv, "-1"sv};
-	constexpr std::array non_decimal_iterations{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv,
-								    "--iterations"sv, "1.5"sv};
-	constexpr std::array overflow_iterations{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv,
-								"--iterations"sv, "18446744073709551616"sv};
-	constexpr std::array too_many_iterations{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv,
-								 "--iterations"sv, "10001"sv};
-	constexpr std::array duplicate_iterations{"--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv,
-								 "--iterations"sv, "1"sv, "--iterations"sv, "2"sv};
+	constexpr std::array zero_iterations{"--provider"sv, "cpu"sv,          "--model"sv,
+					     "model.onnx"sv, "--iterations"sv, "0"sv};
+	constexpr std::array negative_iterations{"--provider"sv, "cpu"sv,          "--model"sv,
+						 "model.onnx"sv, "--iterations"sv, "-1"sv};
+	constexpr std::array non_decimal_iterations{"--provider"sv, "cpu"sv,          "--model"sv,
+						    "model.onnx"sv, "--iterations"sv, "1.5"sv};
+	constexpr std::array overflow_iterations{"--provider"sv, "cpu"sv,          "--model"sv,
+						 "model.onnx"sv, "--iterations"sv, "18446744073709551616"sv};
+	constexpr std::array too_many_iterations{"--provider"sv, "cpu"sv,          "--model"sv,
+						 "model.onnx"sv, "--iterations"sv, "10001"sv};
+	constexpr std::array duplicate_iterations{"--provider"sv,   "cpu"sv, "--model"sv,      "model.onnx"sv,
+						  "--iterations"sv, "1"sv,   "--iterations"sv, "2"sv};
 	constexpr std::array named_provider_without_iterations{"--provider"sv, "MIGraphXExecutionProvider"sv,
-												 "--model"sv, "model.onnx"sv};
+							       "--model"sv, "model.onnx"sv};
 	constexpr std::array compare_without_iterations{"--compare"sv, "cpu"sv, "MIGraphXExecutionProvider"sv,
-									    "--model"sv, "model.onnx"sv};
-	constexpr std::array non_cpu_comparison_baseline{"--compare"sv, "DmlExecutionProvider"sv,
-										       "MIGraphXExecutionProvider"sv, "--model"sv, "model.onnx"sv,
-										       "--iterations"sv, "100"sv};
-	constexpr std::array identical_comparison_providers{"--compare"sv, "cpu"sv, "cpu"sv, "--model"sv,
-											  "model.onnx"sv, "--iterations"sv, "100"sv};
-	constexpr std::array mixed_compare_provider{"--compare"sv, "cpu"sv, "MIGraphXExecutionProvider"sv,
-									   "--provider"sv, "cpu"sv, "--model"sv, "model.onnx"sv,
-									   "--iterations"sv, "100"sv};
+							"--model"sv, "model.onnx"sv};
+	constexpr std::array non_cpu_comparison_baseline{
+		"--compare"sv, "DmlExecutionProvider"sv, "MIGraphXExecutionProvider"sv,
+		"--model"sv,   "model.onnx"sv,           "--iterations"sv,
+		"100"sv};
+	constexpr std::array identical_comparison_providers{"--compare"sv,  "cpu"sv,          "cpu"sv, "--model"sv,
+							    "model.onnx"sv, "--iterations"sv, "100"sv};
+	constexpr std::array mixed_compare_provider{"--compare"sv,  "cpu"sv,          "MIGraphXExecutionProvider"sv,
+						    "--provider"sv, "cpu"sv,          "--model"sv,
+						    "model.onnx"sv, "--iterations"sv, "100"sv};
 	constexpr std::array list_with_iterations{"--list-providers"sv, "--iterations"sv, "100"sv};
 	constexpr std::array prepare_with_iterations{"--prepare-provider"sv, "MIGraphXExecutionProvider"sv,
-									       "--iterations"sv, "100"sv};
+						     "--iterations"sv, "100"sv};
 	constexpr std::array empty_provider_name{"--prepare-provider"sv, ""sv};
 	constexpr std::array missing_provider_name{"--prepare-provider"sv};
 	constexpr std::array duplicate_list{"--list-providers"sv, "--list-providers"sv};
@@ -169,28 +173,30 @@ int main()
 		RejectedCase{"missing model", missing_model, "--model <path> is required"},
 		RejectedCase{"duplicate provider", duplicate_provider, "duplicate option: --provider"},
 		RejectedCase{"duplicate model", duplicate_model, "duplicate option: --model"},
-		RejectedCase{"zero iterations", zero_iterations, "--iterations must be a decimal integer in range 1..10000"},
-		RejectedCase{"negative iterations", negative_iterations, "--iterations must be a decimal integer in range 1..10000"},
+		RejectedCase{"zero iterations", zero_iterations,
+			     "--iterations must be a decimal integer in range 1..10000"},
+		RejectedCase{"negative iterations", negative_iterations,
+			     "--iterations must be a decimal integer in range 1..10000"},
 		RejectedCase{"non-decimal iterations", non_decimal_iterations,
-				     "--iterations must be a decimal integer in range 1..10000"},
+			     "--iterations must be a decimal integer in range 1..10000"},
 		RejectedCase{"overflowing iterations", overflow_iterations,
-				     "--iterations must be a decimal integer in range 1..10000"},
+			     "--iterations must be a decimal integer in range 1..10000"},
 		RejectedCase{"iterations above the supported limit", too_many_iterations,
-				     "--iterations must be a decimal integer in range 1..10000"},
+			     "--iterations must be a decimal integer in range 1..10000"},
 		RejectedCase{"duplicate iterations", duplicate_iterations, "duplicate option: --iterations"},
 		RejectedCase{"named provider without iterations", named_provider_without_iterations,
-				     "--iterations is required for non-cpu providers"},
+			     "--iterations is required for non-cpu providers"},
 		RejectedCase{"comparison without iterations", compare_without_iterations,
-				     "--iterations is required with --compare"},
+			     "--iterations is required with --compare"},
 		RejectedCase{"non-CPU comparison baseline", non_cpu_comparison_baseline,
-				     "--compare baseline must be exactly cpu"},
+			     "--compare baseline must be exactly cpu"},
 		RejectedCase{"identical comparison providers", identical_comparison_providers,
-				     "--compare candidate must differ from cpu"},
+			     "--compare candidate must differ from cpu"},
 		RejectedCase{"mixed compare and provider", mixed_compare_provider, "multiple commands are not allowed"},
 		RejectedCase{"iterations attached to list", list_with_iterations,
-				     "--iterations is only valid with --provider or --compare"},
+			     "--iterations is only valid with --provider or --compare"},
 		RejectedCase{"iterations attached to prepare", prepare_with_iterations,
-				     "--iterations is only valid with --provider or --compare"},
+			     "--iterations is only valid with --provider or --compare"},
 		RejectedCase{"empty prepare-provider name", empty_provider_name,
 			     "--prepare-provider <exact-provider-name> is required"},
 		RejectedCase{"missing prepare-provider name", missing_provider_name,

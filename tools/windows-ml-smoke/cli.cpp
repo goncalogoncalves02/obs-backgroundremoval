@@ -63,10 +63,13 @@ ParseResult parse_cli(std::span<const std::string_view> arguments)
 
 		if (option == "--prepare-provider") {
 			if (prepared_provider_name.has_value()) {
-				return {.options = std::nullopt, .error = "duplicate command option: --prepare-provider"};
+				return {.options = std::nullopt,
+					.error = "duplicate command option: --prepare-provider"};
 			}
-			if (index + 1 >= arguments.size() || arguments[index + 1].empty() || arguments[index + 1].starts_with("--")) {
-				return {.options = std::nullopt, .error = "--prepare-provider <exact-provider-name> is required"};
+			if (index + 1 >= arguments.size() || arguments[index + 1].empty() ||
+			    arguments[index + 1].starts_with("--")) {
+				return {.options = std::nullopt,
+					.error = "--prepare-provider <exact-provider-name> is required"};
 			}
 			if (const auto error = select_command(CliCommand::PrepareProvider, option)) {
 				return *error;
@@ -77,9 +80,11 @@ ParseResult parse_cli(std::span<const std::string_view> arguments)
 		}
 
 		if (option == "--compare") {
-			if (index + 2 >= arguments.size() || arguments[index + 1].empty() || arguments[index + 2].empty() ||
-			    arguments[index + 1].starts_with("--") || arguments[index + 2].starts_with("--")) {
-				return {.options = std::nullopt, .error = "--compare cpu <exact-provider-name> is required"};
+			if (index + 2 >= arguments.size() || arguments[index + 1].empty() ||
+			    arguments[index + 2].empty() || arguments[index + 1].starts_with("--") ||
+			    arguments[index + 2].starts_with("--")) {
+				return {.options = std::nullopt,
+					.error = "--compare cpu <exact-provider-name> is required"};
 			}
 			if (const auto error = select_command(CliCommand::Compare, option)) {
 				return *error;
@@ -105,8 +110,8 @@ ParseResult parse_cli(std::span<const std::string_view> arguments)
 		}
 		if (index + 1 >= arguments.size()) {
 			const auto required = option == "--provider" ? "--provider cpu is required"
-								 : option == "--model" ? "--model <path> is required"
-											       : "--iterations <1..10000> is required";
+					      : option == "--model"  ? "--model <path> is required"
+								     : "--iterations <1..10000> is required";
 			return {.options = std::nullopt, .error = required};
 		}
 
@@ -138,7 +143,8 @@ ParseResult parse_cli(std::span<const std::string_view> arguments)
 			return {.options = std::nullopt, .error = "--model is only valid with --provider cpu"};
 		}
 		if (iterations.has_value()) {
-			return {.options = std::nullopt, .error = "--iterations is only valid with --provider or --compare"};
+			return {.options = std::nullopt,
+				.error = "--iterations is only valid with --provider or --compare"};
 		}
 		return {.options = CliOptions{.command = *command,
 					      .provider_name = std::string(prepared_provider_name.value_or("")),
