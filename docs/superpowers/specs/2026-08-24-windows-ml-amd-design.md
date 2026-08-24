@@ -230,7 +230,7 @@ detailed sprint plan
 
 No Windows/GPU sprint is complete solely because code compiles. Hardware-dependent acceptance is performed by the user on the RX 9070 XT using exact PowerShell commands supplied with the sprint handoff. Each handoff states the working directory, prerequisites, commands, expected output, log-capture command, and files to return.
 
-Temporary plans, subagent ledgers, review packages, and raw Windows logs live under the ignored `.superpowers/` directory. Permanent user-facing evidence is committed only to the relevant documentation files.
+Approved specifications and implementation plans intended for durable review may be committed under `docs/superpowers/`. Temporary ledgers, briefs, reports, review packages, and raw Windows logs live under the ignored `.superpowers/` directory. Permanent user-facing evidence is committed only to the relevant documentation files.
 
 CI validates compilation, CPU model loading, error handling, and packaging. It does not claim GPU success without target hardware.
 

@@ -23,7 +23,7 @@
 - The success report includes `status=ok`, `provider=cpu`, `architecture=x64`, `windows_version`, `windows_ml_package_version=2.2.12`, `onnxruntime_version`, model path, input/output counts, input/output names, element types, tensor shapes, `iterations=1`, finite output count, and `latency_ms`.
 - A valid MediaPipe run requires one float input of shape `1x144x256x3`, one float output of shape `1x144x256x2`, every output value finite, and exactly `73728` output values.
 - Keep the pull request's `windows-only-ci` behavior during this sprint. Do not enable macOS/Linux jobs; the full matrix remains a later release gate.
-- Every new source, test, and CMake file must carry the repository's SPDX copyright and Apache-2.0 license headers so REUSE remains green.
+- New C/C++ source and test files use the repository's SPDX copyright and `GPL-3.0-or-later` license identifier, as required by `CONTRIBUTING.md`. New Python/CMake files retain the repository-consistent SPDX copyright and Apache-2.0 headers so REUSE remains complete.
 - Preserve all changes in the original `GPU` worktree.
 - Commits use `Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>` only and contain no assistant attribution or co-author trailer.
 - Every commit containing generated code uses both DCO sign-off and cryptographic signing via `git commit -s -S`; the user explicitly confirmed the repository contribution requirements before Task 2 began.

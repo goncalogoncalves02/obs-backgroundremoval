@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
