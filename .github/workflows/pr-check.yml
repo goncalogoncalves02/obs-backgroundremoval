@@ -26,6 +26,7 @@ jobs:
       runs-on: windows-2025-vs2026
 
   build-macos-arm64:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'windows-only-ci') }}
     uses: ./.github/workflows/build-macos.yml
     permissions:
       contents: read
@@ -36,6 +37,7 @@ jobs:
       TAHOE_DEVELOPER_DIR: /Applications/Xcode_26.5.app
 
   build-macos-x86_64:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'windows-only-ci') }}
     uses: ./.github/workflows/build-macos.yml
     permissions:
       contents: read
@@ -46,6 +48,7 @@ jobs:
       TAHOE_DEVELOPER_DIR: /Applications/Xcode_26.5.app
 
   build-debian-amd64:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'windows-only-ci') }}
     uses: ./.github/workflows/build-debian.yml
     permissions:
       contents: read
@@ -54,6 +57,7 @@ jobs:
       arm64: false
 
   build-debian-arm64:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'windows-only-ci') }}
     uses: ./.github/workflows/build-debian.yml
     permissions:
       contents: read
@@ -62,6 +66,7 @@ jobs:
       arm64: true
 
   build-ubuntu-amd64:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'windows-only-ci') }}
     uses: ./.github/workflows/build-ubuntu.yml
     permissions:
       contents: read
@@ -70,6 +75,7 @@ jobs:
       arm64: false
 
   build-ubuntu-arm64:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'windows-only-ci') }}
     uses: ./.github/workflows/build-ubuntu.yml
     permissions:
       contents: read
@@ -78,6 +84,7 @@ jobs:
       arm64: true
 
   build-arch:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'windows-only-ci') }}
     uses: ./.github/workflows/build-arch.yml
     permissions:
       contents: read

@@ -25,6 +25,9 @@ on:
       dll-artifact:
         description: DLL artifact for Windows.
         value: ${{ jobs.build.outputs.DLL_ARTIFACT_NAME }}
+      smoke-tool-artifact:
+        description: Windows ML smoke-tool artifact for x64 hardware testing.
+        value: ${{ jobs.build.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
 
 env:
   # https://github.com/kaito-tokyo/vcpkg-obs-kaito-tokyo
@@ -37,6 +40,7 @@ jobs:
 
     outputs:
       DLL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
+      SMOKE_TOOL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
 
     env:
       CCACHE_ORT_DIR: .ccache_ort
@@ -95,8 +99,11 @@ jobs:
           PLUGIN_VERSION: ${{ steps.buildspec.outputs.PLUGIN_VERSION }}
         run: |
           $DLL_ARTIFACT_NAME = "obs-backgroundremoval_$env:PLUGIN_VERSION.dll.zip"
+          $SMOKE_TOOL_ARTIFACT_NAME = "windows-ml-smoke_2.2.12_x64.zip"
           "DLL_ARTIFACT_NAME=$DLL_ARTIFACT_NAME"
+          "SMOKE_TOOL_ARTIFACT_NAME=$SMOKE_TOOL_ARTIFACT_NAME"
           Add-Content -Value "DLL_ARTIFACT_NAME=$DLL_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          Add-Content -Value "SMOKE_TOOL_ARTIFACT_NAME=$SMOKE_TOOL_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
 
       # BEGIN: Set up toolchains
 
@@ -127,6 +134,123 @@ jobs:
           python-version: '3.9'
 
       # END: Set up toolchains
+
+      - name: Configure Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          WINDOWS_ML_DIR: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}\build\cmake
+          CMAKE_SYSTEM_VERSION: ${{ steps.buildspec.outputs.windows_sdk_version }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke -G Ninja `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-Dmicrosoft.windows.ai.machinelearning_DIR=$env:WINDOWS_ML_DIR" `
+            "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION"
+
+          cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke_cli -G Ninja `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION" `
+            "-DWINDOWS_ML_SMOKE_CLI_TESTS_ONLY=ON"
+
+      - name: Build Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          cmake --build build_windows_ml_smoke --config Release --parallel
+          cmake --build build_windows_ml_smoke_cli --config Release --parallel
+
+      - name: Test Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          ctest --test-dir build_windows_ml_smoke_cli --output-on-failure
+          ctest --test-dir build_windows_ml_smoke --output-on-failure
+          $env:WINDOWS_ML_SMOKE_EXE = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke') 'windows-ml-smoke.exe'
+          $env:WINDOWS_ML_SMOKE_MODEL = Join-Path $env:GITHUB_WORKSPACE 'data\models\mediapipe.onnx'
+          & $env:PYTHON_COMMAND tests/WindowsMlSmoke/test_windows_ml_smoke.py
+          & $env:WINDOWS_ML_SMOKE_EXE --provider cpu --model $env:WINDOWS_ML_SMOKE_MODEL
+
+      - name: Package Windows ML smoke-tool artifact
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          SMOKE_TOOL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+        run: |
+          $SMOKE_BUILD_DIR = Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke'
+          $SMOKE_MODEL_PATH = Join-Path $env:GITHUB_WORKSPACE 'data\models\mediapipe.onnx'
+          $SMOKE_STAGE_DIR = Join-Path '${{ steps.job-temp.outputs.JOB_TEMP }}' 'windows-ml-smoke'
+          $SMOKE_ARCHIVE_PATH = Join-Path $env:GITHUB_WORKSPACE $env:SMOKE_TOOL_ARTIFACT_NAME
+          New-Item -Path $SMOKE_STAGE_DIR -ItemType Directory -Force
+          Copy-Item -LiteralPath (Join-Path $SMOKE_BUILD_DIR 'windows-ml-smoke.exe') -Destination $SMOKE_STAGE_DIR
+          Copy-Item -LiteralPath $SMOKE_MODEL_PATH -Destination $SMOKE_STAGE_DIR
+          $RUNTIME_DLLS = @(Get-ChildItem -LiteralPath $SMOKE_BUILD_DIR -Filter '*.dll' -File)
+          if ($RUNTIME_DLLS.Count -eq 0) {
+            throw 'The Windows ML smoke tool has no adjacent runtime DLLs to package.'
+          }
+          $RUNTIME_DLLS | Copy-Item -Destination $SMOKE_STAGE_DIR
+
+          $STAGED_FILES = @(Get-ChildItem -LiteralPath $SMOKE_STAGE_DIR -File)
+          $STAGED_EXECUTABLES = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.exe' })
+          $STAGED_MODELS = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.onnx' })
+          $STAGED_DLLS = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.dll' })
+          if ($STAGED_EXECUTABLES.Count -ne 1 -or $STAGED_EXECUTABLES[0].Name -cne 'windows-ml-smoke.exe') {
+            throw "The Windows ML smoke staging directory must contain exactly one windows-ml-smoke.exe; found $($STAGED_EXECUTABLES.Count)."
+          }
+          if ($STAGED_MODELS.Count -ne 1 -or $STAGED_MODELS[0].Name -cne 'mediapipe.onnx') {
+            throw "The Windows ML smoke staging directory must contain exactly one mediapipe.onnx; found $($STAGED_MODELS.Count)."
+          }
+          if ($STAGED_DLLS.Count -eq 0) {
+            throw 'The Windows ML smoke staging directory must contain at least one adjacent runtime DLL.'
+          }
+
+          Compress-Archive -LiteralPath $STAGED_FILES.FullName -DestinationPath $SMOKE_ARCHIVE_PATH
+
+          $SMOKE_ARCHIVE = [System.IO.Compression.ZipFile]::OpenRead($SMOKE_ARCHIVE_PATH)
+          try {
+            $ZIP_FILE_ENTRIES = @($SMOKE_ARCHIVE.Entries | Where-Object { -not [string]::IsNullOrEmpty($_.Name) })
+            $ZIP_EXECUTABLE_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.exe' })
+            $ZIP_MODEL_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.onnx' })
+            $ZIP_DLL_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.dll' })
+            if ($ZIP_EXECUTABLE_ENTRIES.Count -ne 1 -or
+                $ZIP_EXECUTABLE_ENTRIES[0].FullName -cne 'windows-ml-smoke.exe') {
+              throw "The Windows ML smoke ZIP must contain exactly one root windows-ml-smoke.exe entry; found $($ZIP_EXECUTABLE_ENTRIES.Count)."
+            }
+            if ($ZIP_MODEL_ENTRIES.Count -ne 1 -or $ZIP_MODEL_ENTRIES[0].FullName -cne 'mediapipe.onnx') {
+              throw "The Windows ML smoke ZIP must contain exactly one root mediapipe.onnx entry; found $($ZIP_MODEL_ENTRIES.Count)."
+            }
+            if ($ZIP_DLL_ENTRIES.Count -eq 0) {
+              throw 'The Windows ML smoke ZIP must contain at least one runtime DLL entry.'
+            }
+            if (@($ZIP_DLL_ENTRIES | Where-Object { $_.FullName -cne $_.Name }).Count -ne 0) {
+              throw 'Every Windows ML smoke runtime DLL must be adjacent to the executable in the ZIP root.'
+            }
+          } finally {
+            $SMOKE_ARCHIVE.Dispose()
+          }
+
+      - name: Attest Windows ML smoke-tool artifact
+        if: inputs.upload-artifacts && inputs.attest-artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+
+      - name: Upload Windows ML smoke-tool artifact
+        if: inputs.upload-artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+          archive: false
+          if-no-files-found: error
 
       - name: Configure OBS Studio (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
@@ -225,6 +349,14 @@ jobs:
             $env:REDUCED_OPS_CONFIG_PATH `
             --cmake_build_dir build_ort `
             --is_extended_minimal_build_or_higher
+
+      - name: Verify reduced operators for ONNX Runtime (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+          REDUCED_OPERATORS_BUILD_DIR: build_ort
+        run: |
+          & $env:PYTHON_COMMAND tests/ReducedOperators/test_reduced_operators.py
 
       - name: Configure ONNX Runtime (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
