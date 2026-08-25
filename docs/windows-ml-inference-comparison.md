@@ -2,9 +2,9 @@
 
 ## Scope and current status
 
-This document defines the Sprint 4 isolated inference and comparison gate. Hardware execution has not yet occurred for this exact-head artifact: every result below is explicitly **pending**. No provider is approved for plugin integration, and no latency or correctness measurement is inferred from build, discovery, readiness, registration, or session-construction evidence.
+This document records the completed Sprint 4 isolated inference and comparison gate for the exact-head artifact. Exact-head hardware execution completed on the RX 9070 XT, and both MIGraphX and DirectML passed the candidate gate with measured latency and correctness evidence. DirectML is the approved Sprint 5 primary provider; MIGraphX is a validated secondary candidate. The later evidence-omissions section transparently records the redundant captures not present in the pasted exact-head excerpt.
 
-MIGraphX is the primary candidate. DirectML is an independent comparison and fallback candidate. A controlled provider or inference failure is useful evidence, but it does not authorize integration of that provider.
+A controlled provider or inference failure remains useful evidence, but it does not authorize integration of that provider.
 
 ## Exact-head artifact gate
 
