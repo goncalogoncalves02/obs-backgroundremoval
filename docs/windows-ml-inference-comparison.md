@@ -57,40 +57,39 @@ A candidate passes only when all of the following are established by the capture
 
 An exit code other than `0`, fewer than 100 timed calls for either side, a non-finite or incorrectly sized output, a failed correctness threshold, or a candidate average latency equal to or slower than CPU is a failed gate. Provider availability alone is insufficient.
 
-## Pending hardware and artifact evidence
+## Exact-head hardware and artifact evidence
 
-All fields in this section await exact-head CI, artifact audit, and user-supplied RX 9070 XT logs. Values must remain `PENDING` until supported by exact sanitized evidence.
+The following sanitized evidence is for reviewed source commit `c3c6f19440201b47063e7501a92d50f8581cefa6`. `Check CI` run `32792290473`, PR Check run `32792290752`, and the `build-windows-x64 / build` job `97636124843` all succeeded at that exact source commit; the Windows job included the 64-session metadata regression and the full plugin build.
 
-| Evidence item | Result | Required source |
-|---|---|---|
-| Reviewed source commit | `PENDING` | Exact reviewed Git SHA |
-| GitHub Actions run and artifact ID | `PENDING` | Same-SHA successful Windows workflow |
-| GitHub artifact digest | `PENDING` | GitHub artifact metadata |
-| Downloaded ZIP SHA-256 | `PENDING` | Local hash of downloaded artifact |
-| Extracted `windows-ml-smoke.exe` SHA-256 | `PENDING` | Local extracted-file hash |
-| Extracted `mediapipe.onnx` SHA-256 | `PENDING` | Local extracted-file hash |
-| Tracked `data/models/mediapipe.onnx` SHA-256 and identity match | `PENDING` | Same reviewed source SHA |
-| Windows version and build | `PENDING` | Hardware host evidence |
-| GPU name, vendor ID, and device ID | `PENDING` | Hardware host and smoke-tool evidence |
-| AMD GPU driver version | `PENDING` | Hardware host evidence |
-| MIGraphX readiness before and after preparation | `PENDING` | Preparation report |
-| MIGraphX process activation attempted/result | `PENDING` | Inference/comparison reports |
-| MIGraphX registration result | `PENDING` | Preparation/inference/comparison reports |
-| MIGraphX selected EP name and device ID | `PENDING` | Inference/comparison reports |
-| DirectML readiness/activation/registration state | `PENDING` | Inference/comparison reports |
-| DirectML selected EP name and device ID | `PENDING` | Inference/comparison reports |
-| CPU latency average / p50 / p95 | `PENDING` | 100-timed-call reports |
-| MIGraphX latency average / p50 / p95 | `PENDING` | 100-timed-call reports |
-| DirectML latency average / p50 / p95 | `PENDING` | 100-timed-call reports |
-| MIGraphX finite counts / normalized MAE / foreground IoU | `PENDING` | MIGraphX comparison report |
-| DirectML finite counts / normalized MAE / foreground IoU | `PENDING` | DirectML comparison report |
-| MIGraphX and DirectML speedup/performance gate summaries | `PENDING` | Comparison reports |
-| `prepare_exit_code` | `PENDING` | Immediate PowerShell capture |
-| `cpu_exit_code` | `PENDING` | Immediate PowerShell capture |
-| `migraphx_exit_code` | `PENDING` | Immediate PowerShell capture |
-| `migraphx_compare_exit_code` | `PENDING` | Immediate PowerShell capture |
-| `directml_exit_code` | `PENDING` | Immediate PowerShell capture |
-| `directml_compare_exit_code` | `PENDING` | Immediate PowerShell capture |
-| Sprint 5 go/no-go decision and accepted provider | `PENDING` | All Sprint 4 gates and reviews |
+| Evidence item | Exact result |
+|---|---|
+| Artifact | ID `9543601156`; `windows-ml-smoke_2.2.12_x64.zip` |
+| GitHub artifact digest / fresh local ZIP SHA-256 | `sha256:b5825944b877867a131b863df5258472f0381e83bcfdbf0ff09420284db83ace` / `b5825944b877867a131b863df5258472f0381e83bcfdbf0ff09420284db83ace` |
+| Artifact root entries | `Microsoft.Windows.AI.MachineLearning.dll`, `mediapipe.onnx`, `onnxruntime.dll`, `windows-ml-smoke.exe` |
+| Extracted executable SHA-256 | `47045bf0ccf86ba2337bfa6ed4861877a07eb9b5f1410ec71eae4fccdc83411b` |
+| Extracted / tracked model SHA-256 | `7f785cf032261a07af7b845f891cab30da3f0757c7b362310e089e3aa8e8860a` / `7f785cf032261a07af7b845f891cab30da3f0757c7b362310e089e3aa8e8860a`; `cmp` confirmed byte identity |
+| Hardware host | Windows `10.0.26200`, release `25H2`, revision `9168`, 64-bit; AMD Radeon RX 9070 XT, vendor `0x1002`, device `0x7550`; driver `32.0.31041.1004` |
 
-The Sprint 5 decision stays pending until exact-head CI and artifact integrity pass, the RX 9070 XT evidence satisfies every acceptance criterion for at least one candidate, all four Sprint 4 task reviews are clean, and the final whole-sprint review is clean.
+### MIGraphX
+
+The exact-head direct inference requested and effectively used `MIGraphXExecutionProvider`. Process activation was attempted (`true`), registration succeeded (`true`), CPU EP fallback was disabled (`true`), and the selected device was `MIGraphXExecutionProvider`, `0x7550`. The input/output were float `1x144x256x3` / `1x144x256x2`; after 10 warm-ups, 100 timed calls produced `finite_output_count=73728`, average / p50 / p95 latency `2.330348` / `2.330050` / `2.513800` ms, and `status=ok`. The immediate capture recorded `migraphx_exit_code=0`.
+
+The exact-head comparison completed 100 timed calls for both CPU and MIGraphX. CPU finite output count was `73728`, with average / p50 / p95 `2.809828` / `2.809650` / `3.107500` ms. Candidate finite output count was `73728`, with average / p50 / p95 `2.207812` / `2.200000` / `2.423100` ms. It reported speedup `1.272675`, normalized MAE `0.000005`, foreground intersection / union / IoU `0` / `0` / `1.000000`, and all MAE, IoU, and performance gates `true`; `status=ok` and `migraphx_compare_exit_code=0` were captured. The empty-union IoU of `1.000000` follows the approved contract: empty-union IoU is `1.0`.
+
+### DirectML
+
+The exact-head direct inference requested and effectively used `DmlExecutionProvider`. Process activation was not attempted (`false`); registration was `false` because this is the built-in visible EP-device path; CPU EP fallback was disabled (`true`); and the selected device was `DmlExecutionProvider`, `0x7550`. The input/output were float `1x144x256x3` / `1x144x256x2`; after 10 warm-ups, 100 timed calls produced `finite_output_count=73728`, average / p50 / p95 latency `0.497712` / `0.488800` / `0.584400` ms, and `status=ok`. The immediate capture recorded `directml_exit_code=0`.
+
+The exact-head comparison completed 100 timed calls for both CPU and DirectML. CPU finite output count was `73728`, with average / p50 / p95 `2.789580` / `2.792050` / `3.115100` ms. Candidate finite output count was `73728`, with average / p50 / p95 `0.504340` / `0.489400` / `0.598800` ms. It reported speedup `5.531150`, normalized MAE `0.000008`, foreground intersection / union / IoU `0` / `0` / `1.000000`, and all MAE, IoU, and performance gates `true`; its tool report was on the successful `status=ok` path. The empty-union IoU of `1.000000` follows the approved contract: empty-union IoU is `1.0`.
+
+### Evidence omissions
+
+The pasted exact-head preparation excerpt shows the `--prepare-provider` command but not its key-value report or immediate `prepare_exit_code` capture. Earlier hardware evidence established `not_ready -> ready`, registration success, and the exact AMD GPU; exact-head MIGraphX direct inference independently establishes activation, registration, selected device, 100 calls, and disabled CPU fallback.
+
+A standalone exact-head CPU benchmark was not pasted. Both exact-head comparisons nevertheless executed and validated 100 CPU timed calls, reported `cpu_finite_output_count=73728`, and supplied their same-process CPU latency distributions for the speedup gates.
+
+The pasted DirectML comparison excerpt ends at the immediate PowerShell capture expression and does not include a rendered `directml_compare_exit_code` line. This document does not invent that field; the tool report's `status=ok` is the successful path recorded in the supplied evidence.
+
+## Sprint 5 decision
+
+Both MIGraphX and DirectML satisfy the Sprint 4 candidate gate. DirectML is the approved Sprint 5 primary provider: it passes the same correctness gates and reports `5.531150x` speedup on the tested RX 9070 XT, compared with MIGraphX `1.272675x`. MIGraphX remains a validated secondary candidate and is not the Sprint 5 primary.
