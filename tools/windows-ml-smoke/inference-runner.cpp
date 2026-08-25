@@ -133,8 +133,10 @@ InferenceResult run_inference(std::string_view model_path, std::string_view prov
 		result.input_name = input_name.get();
 		result.output_name = output_name.get();
 
-		const auto input_info = session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
-		const auto output_info = session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo();
+		const Ort::TypeInfo input_type_info = session.GetInputTypeInfo(0);
+		const auto input_info = input_type_info.GetTensorTypeAndShapeInfo();
+		const Ort::TypeInfo output_type_info = session.GetOutputTypeInfo(0);
+		const auto output_info = output_type_info.GetTensorTypeAndShapeInfo();
 		result.input_shape = input_info.GetShape();
 		result.output_shape = output_info.GetShape();
 		require(input_info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,

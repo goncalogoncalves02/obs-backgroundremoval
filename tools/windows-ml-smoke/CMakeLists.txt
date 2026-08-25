@@ -64,6 +64,8 @@ endif()
 
 find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
 
+enable_testing()
+
 add_executable(windows-ml-smoke main.cpp inference-runner.cpp ../../src/ort-utils/windows-ml-provider.cpp)
 target_compile_features(windows-ml-smoke PRIVATE cxx_std_20)
 target_compile_definitions(windows-ml-smoke PRIVATE WINDOWS_ML_PACKAGE_VERSION="2.2.12")
@@ -80,4 +82,31 @@ add_custom_command(
   COMMAND
     "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:windows-ml-smoke> $<TARGET_FILE_DIR:windows-ml-smoke>
   COMMAND_EXPAND_LISTS
+)
+
+add_executable(
+  windows-ml-smoke-inference-metadata-test
+  tests/inference-metadata-test.cpp
+  inference-runner.cpp
+  ../../src/ort-utils/windows-ml-provider.cpp
+)
+target_compile_features(windows-ml-smoke-inference-metadata-test PRIVATE cxx_std_20)
+target_include_directories(windows-ml-smoke-inference-metadata-test PRIVATE ../../src/ort-utils)
+target_link_libraries(
+  windows-ml-smoke-inference-metadata-test
+  PRIVATE windows-ml-smoke-benchmark windows-ml-smoke-provider-policy WindowsML::Api WindowsML::OnnxRuntime
+)
+
+add_custom_command(
+  TARGET windows-ml-smoke-inference-metadata-test
+  POST_BUILD
+  COMMAND
+    "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:windows-ml-smoke-inference-metadata-test>
+    $<TARGET_FILE_DIR:windows-ml-smoke-inference-metadata-test>
+  COMMAND_EXPAND_LISTS
+)
+
+add_test(
+  NAME windows-ml-smoke-inference-metadata
+  COMMAND windows-ml-smoke-inference-metadata-test "${CMAKE_CURRENT_SOURCE_DIR}/../../data/models/mediapipe.onnx"
 )
