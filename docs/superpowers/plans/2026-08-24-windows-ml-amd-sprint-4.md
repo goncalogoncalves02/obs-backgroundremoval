@@ -26,7 +26,7 @@
 - Comparison uses mean absolute error over all `73728` output floats. Because MediaPipe output values are probabilities, normalized MAE is that mean on the `[0,1]` scale and must be at most `0.05`.
 - Binary-mask IoU uses foreground channel `1`, threshold `>= 0.5`, and must be at least `0.95`; if both masks have an empty union, IoU is `1.0`.
 - A candidate passes only when it completes 100 timed calls, meets both correctness thresholds, and its average timed latency is strictly lower than CPU for the same process, model, and input.
-- All diagnostics are unique `key=value` lines, strings are single-line sanitized, decimal floating-point values use six digits after the decimal point, and stdout ends with `status=ok` or `status=unavailable`.
+- All diagnostics are unique `key=value` lines, strings are single-line sanitized, decimal floating-point values use six digits after the decimal point, and stdout ends with `status=ok`, `status=unavailable`, or `status=failed` for exit-4 model/session/inference/comparison validation failures.
 - Exit codes remain `0` success, `2` CLI usage, `3` unsupported platform/architecture, `4` model/session/inference/comparison validation failure, and `5` provider discovery/activation/registration/device-visibility failure.
 - Do not modify OBS plugin code, model preprocessing/postprocessing, Linux/macOS provider behavior, or the existing standalone ONNX Runtime build.
 - Use strict RED/GREEN TDD: each production behavior starts with a test that is run and observed failing for the intended reason.
