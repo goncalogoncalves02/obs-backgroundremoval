@@ -25,7 +25,7 @@ include(GNUInstallDirs)
 include(./cmake/collect_licenses.cmake OPTIONAL)
 
 block(
-  PROPAGATE PLUGIN_DISPLAY_NAME PLUGIN_AUTHOR PLUGIN_EMAIL PLUGIN_BUNDLE_ID PLUGIN_LATEST_VERSION_URL
+  PROPAGATE PLUGIN_DISPLAY_NAME PLUGIN_AUTHOR PLUGIN_EMAIL PLUGIN_BUNDLE_ID PLUGIN_LATEST_VERSION_URL windows_ml_version
 )
   file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/buildspec.props" BUILDSPEC_LINES)
   foreach(LINE IN LISTS BUILDSPEC_LINES)
@@ -117,8 +117,12 @@ function(check_onnxruntime_execution_provider result symbol)
   set(${result} "${found}" PARENT_SCOPE)
 endfunction()
 
+include(cmake/onnxruntime_backend)
+
 ### Package dependencies
 find_package(PkgConfig QUIET)
+
+add_onnxruntime_backend(OnnxRuntimeBackend "${windows_ml_version}")
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -202,79 +206,63 @@ block(PROPAGATE OpenCV_FOUND)
   endif()
 endblock()
 
-block(PROPAGATE onnxruntime_FOUND HAVE_ONNXRUNTIME_CUDA_EP HAVE_ONNXRUNTIME_ROCM_EP)
-  set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON)
+if(NOT WIN32)
+  block(PROPAGATE onnxruntime_FOUND HAVE_ONNXRUNTIME_CUDA_EP HAVE_ONNXRUNTIME_ROCM_EP)
+    set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON)
 
-  find_program(Protobuf_PROTOC_EXECUTABLE NAMES protoc HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES tools/protobuf)
+    find_program(Protobuf_PROTOC_EXECUTABLE NAMES protoc HINTS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES tools/protobuf)
 
-  find_package(onnxruntime CONFIG)
-
-  # WORKAROUND: CMake 4 compatibility
-  if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0)
-    map_imported_executable_to_release(protobuf::protoc "${Protobuf_PROTOC_EXECUTABLE}")
-  endif()
-
-  if(NOT onnxruntime_FOUND AND PkgConfig_FOUND)
-    pkg_check_modules(PC_onnxruntime onnxruntime IMPORTED_TARGET)
-    if(PC_onnxruntime_FOUND)
-      add_library(onnxruntime::onnxruntime ALIAS PkgConfig::PC_onnxruntime)
-      set(onnxruntime_FOUND TRUE)
+    # WORKAROUND: CMake 4 compatibility
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0)
+      map_imported_executable_to_release(protobuf::protoc "${Protobuf_PROTOC_EXECUTABLE}")
     endif()
-  endif()
 
-  if(NOT onnxruntime_FOUND)
-    message(FATAL_ERROR "ONNX Runtime not found via CMake or pkg-config.")
-  endif()
+    ### Check execution provider availability
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
 
-  if(NOT TARGET onnxruntime::onnxruntime)
-    add_library(onnxruntime::onnxruntime ALIAS onnxruntime)
-  endif()
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_LIBRARIES OnnxRuntimeBackend)
+    set(CMAKE_REQUIRED_QUIET TRUE)
 
-  ### Check execution provider availability
-  set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
+    check_onnxruntime_execution_provider(
+      HAVE_ONNXRUNTIME_CUDA_EP
+      OrtSessionOptionsAppendExecutionProvider_CUDA
+      onnxruntime_c_api.h
+      onnxruntime/onnxruntime_c_api.h
+      onnxruntime/core/session/onnxruntime_c_api.h
+      cuda_provider_factory.h
+      onnxruntime/cuda_provider_factory.h
+      onnxruntime/core/providers/cuda/cuda_provider_factory.h
+    )
 
-  cmake_push_check_state(RESET)
-  set(CMAKE_REQUIRED_LIBRARIES onnxruntime::onnxruntime)
-  set(CMAKE_REQUIRED_QUIET TRUE)
+    if(HAVE_ONNXRUNTIME_CUDA_EP)
+      message(STATUS "Building with ONNX Runtime CUDA EP.")
+      target_compile_definitions(BuildOptions INTERFACE HAVE_ONNXRUNTIME_CUDA_EP)
+    else()
+      message(STATUS "Building without ONNX Runtime CUDA EP.")
+    endif()
 
-  check_onnxruntime_execution_provider(
-    HAVE_ONNXRUNTIME_CUDA_EP
-    OrtSessionOptionsAppendExecutionProvider_CUDA
-    onnxruntime_c_api.h
-    onnxruntime/onnxruntime_c_api.h
-    onnxruntime/core/session/onnxruntime_c_api.h
-    cuda_provider_factory.h
-    onnxruntime/cuda_provider_factory.h
-    onnxruntime/core/providers/cuda/cuda_provider_factory.h
-  )
+    check_onnxruntime_execution_provider(
+      HAVE_ONNXRUNTIME_ROCM_EP
+      OrtSessionOptionsAppendExecutionProvider_ROCM
+      onnxruntime_c_api.h
+      onnxruntime/onnxruntime_c_api.h
+      onnxruntime/core/session/onnxruntime_c_api.h
+      rocm_provider_factory.h
+      onnxruntime/rocm_provider_factory.h
+      onnxruntime/core/providers/rocm/rocm_provider_factory.h
+    )
 
-  if(HAVE_ONNXRUNTIME_CUDA_EP)
-    message(STATUS "Building with ONNX Runtime CUDA EP.")
-    target_compile_definitions(BuildOptions INTERFACE HAVE_ONNXRUNTIME_CUDA_EP)
-  else()
-    message(STATUS "Building without ONNX Runtime CUDA EP.")
-  endif()
+    if(HAVE_ONNXRUNTIME_ROCM_EP)
+      message(STATUS "Building with ONNX Runtime ROCm EP.")
+      target_compile_definitions(BuildOptions INTERFACE HAVE_ONNXRUNTIME_ROCM_EP)
+    else()
+      message(STATUS "Building without ONNX Runtime ROCm EP.")
+    endif()
 
-  check_onnxruntime_execution_provider(
-    HAVE_ONNXRUNTIME_ROCM_EP
-    OrtSessionOptionsAppendExecutionProvider_ROCM
-    onnxruntime_c_api.h
-    onnxruntime/onnxruntime_c_api.h
-    onnxruntime/core/session/onnxruntime_c_api.h
-    rocm_provider_factory.h
-    onnxruntime/rocm_provider_factory.h
-    onnxruntime/core/providers/rocm/rocm_provider_factory.h
-  )
-
-  if(HAVE_ONNXRUNTIME_ROCM_EP)
-    message(STATUS "Building with ONNX Runtime ROCm EP.")
-    target_compile_definitions(BuildOptions INTERFACE HAVE_ONNXRUNTIME_ROCM_EP)
-  else()
-    message(STATUS "Building without ONNX Runtime ROCm EP.")
-  endif()
-
-  cmake_pop_check_state()
-endblock()
+    cmake_pop_check_state()
+  endblock()
+endif()
 
 ### Plugin main
 add_subdirectory(vendor/josuttis-jthread)
@@ -289,7 +277,7 @@ target_link_libraries(
     OBS::libobs
     OBS::obs-frontend-api
     Qt6::Widgets
-    onnxruntime::onnxruntime
+    OnnxRuntimeBackend
     UpdateConfig
     OpenCV::opencv_core
     OpenCV::opencv_imgproc
