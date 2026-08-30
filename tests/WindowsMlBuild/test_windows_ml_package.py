@@ -2,19 +2,32 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = REPOSITORY_ROOT / "scripts" / "verify_windows_ml_package.py"
 PLUGIN_BIN = Path("obs-backgroundremoval/bin/64bit")
 PLUGIN_LICENSES = Path("obs-backgroundremoval/licenses")
+
+
+def load_verifier_module():
+    specification = importlib.util.spec_from_file_location("windows_ml_package_verifier", VERIFIER)
+    if specification is None or specification.loader is None:
+        raise RuntimeError(f"could not load verifier module: {VERIFIER}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
 
 
 class WindowsMlPackageTest(unittest.TestCase):
@@ -106,6 +119,32 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("duplicate case-insensitive archive path", result.stderr)
 
+    def test_missing_archive_reports_one_package_contract_error(self):
+        self.archive.unlink()
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.count("package-contract-error:"), 1)
+        self.assertIn("could not read archive", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_file_read_error_becomes_package_contract_error(self):
+        verifier = load_verifier_module()
+        unreadable_file = self.fixture_root / "unreadable.bin"
+        unreadable_file.write_bytes(b"contents")
+
+        with mock.patch.object(Path, "open", side_effect=PermissionError("access denied")):
+            try:
+                verifier.sha256_file(unreadable_file)
+            except verifier.PackageContractError as error:
+                self.assertIn("could not read file", str(error))
+                self.assertIn("unreadable.bin", str(error))
+            except OSError as error:
+                self.fail(f"filesystem error escaped the package contract: {error}")
+            else:
+                self.fail("filesystem error did not fail the package contract")
+
     def test_windows_drive_qualified_archive_path_is_rejected(self):
         with zipfile.ZipFile(self.archive, "a") as package:
             package.writestr(r"C:\\outside\\payload.dll", b"untrusted payload")
@@ -191,6 +230,50 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("package-contract-error: link is prohibited", result.stderr)
         self.assertIn("self-linked-directory", result.stderr)
+
+    def test_file_attribute_reparse_point_is_classified_as_link_like(self):
+        verifier = load_verifier_module()
+        metadata = type(
+            "ReparsePointMetadata",
+            (),
+            {
+                "st_mode": stat.S_IFDIR,
+                "st_file_attributes": stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            },
+        )()
+        self.assertTrue(verifier.is_link_like_metadata(metadata))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction test")
+    def test_windows_junction_in_install_tree_is_rejected_without_following_it(self):
+        junction_target = self.fixture_root / "outside-junction-target"
+        junction_target.mkdir()
+        junction_target.joinpath("DirectML.dll").write_bytes(b"prohibited runtime")
+        junction = self.install_root / "linked-junction"
+        creation = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/j", str(junction), str(junction_target)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if creation.returncode != 0:
+            diagnostic = f"{creation.stdout}\n{creation.stderr}".strip()
+            permission_markers = (
+                "access is denied",
+                "acesso negado",
+                "privilege",
+                "privilegio",
+                "privilégio",
+            )
+            if any(marker in diagnostic.casefold() for marker in permission_markers):
+                self.skipTest(f"junction creation is not authorized: {diagnostic}")
+            self.fail(f"junction creation failed: {diagnostic}")
+        self.addCleanup(os.rmdir, junction)
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("package-contract-error: link is prohibited", result.stderr)
+        self.assertIn("linked-junction", result.stderr)
 
     def _create_valid_fixture(self):
         native_directory = self.windows_ml_root / "runtimes/win-x64/native"

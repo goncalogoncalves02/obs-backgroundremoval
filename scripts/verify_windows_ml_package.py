@@ -4,6 +4,8 @@
 
 import argparse
 import hashlib
+import os
+import stat
 import sys
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -29,9 +31,12 @@ class PackageContractError(RuntimeError):
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise PackageContractError(f"could not read file {path}: {error}") from error
     return digest.hexdigest()
 
 
@@ -39,33 +44,67 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def is_link_like(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction and is_junction())
-
-
-def require_nonempty_file(path: Path) -> None:
-    if is_link_like(path):
-        raise PackageContractError(f"symbolic link is prohibited: {path}")
-    if not path.is_file() or path.stat().st_size == 0:
-        raise PackageContractError(f"required non-empty file is missing: {path}")
-
-
-def files_named(root: Path, filename: str) -> list[Path]:
-    expected = filename.casefold()
-    return sorted(
-        path
-        for path in root.rglob("*")
-        if (path.is_file() or is_link_like(path)) and path.name.casefold() == expected
+def is_link_like_metadata(metadata: os.stat_result) -> bool:
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
     )
 
 
-def require_no_link_like_entries(root: Path) -> None:
-    for path in root.rglob("*"):
-        if is_link_like(path):
-            raise PackageContractError(f"link is prohibited: {path}")
+def require_safe_install_entry(path: Path, metadata: os.stat_result) -> None:
+    if is_link_like_metadata(metadata):
+        raise PackageContractError(f"link is prohibited: {path}")
+
+
+def install_tree_entries(root: Path) -> list[Path]:
+    entries: list[Path] = []
+    pending_directories = [root]
+    while pending_directories:
+        directory = pending_directories.pop()
+        try:
+            directory_metadata = os.lstat(directory)
+        except OSError as error:
+            raise PackageContractError(f"could not inspect install tree directory {directory}: {error}") from error
+        require_safe_install_entry(directory, directory_metadata)
+        if not stat.S_ISDIR(directory_metadata.st_mode):
+            raise PackageContractError(f"install tree directory is missing: {directory}")
+
+        try:
+            with os.scandir(directory) as iterator:
+                directory_entries = sorted(iterator, key=lambda entry: (entry.name.casefold(), entry.name))
+        except OSError as error:
+            raise PackageContractError(f"could not enumerate install tree directory {directory}: {error}") from error
+
+        child_directories = []
+        for entry in directory_entries:
+            path = directory / entry.name
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise PackageContractError(f"could not inspect install tree entry {path}: {error}") from error
+            require_safe_install_entry(path, metadata)
+            entries.append(path)
+            if stat.S_ISDIR(metadata.st_mode):
+                child_directories.append(path)
+        pending_directories.extend(reversed(child_directories))
+    return entries
+
+
+def require_nonempty_file(path: Path) -> None:
+    try:
+        metadata = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        raise PackageContractError(f"required non-empty file is missing: {path}") from None
+    except OSError as error:
+        raise PackageContractError(f"could not inspect required file {path}: {error}") from error
+    if is_link_like_metadata(metadata):
+        raise PackageContractError(f"link is prohibited: {path}")
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0:
+        raise PackageContractError(f"required non-empty file is missing: {path}")
+
+
+def files_named(entries: list[Path], filename: str) -> list[Path]:
+    expected = filename.casefold()
+    return sorted(path for path in entries if path.name.casefold() == expected)
 
 
 def require_same_file(actual: Path, expected: Path) -> None:
@@ -76,21 +115,21 @@ def require_same_file(actual: Path, expected: Path) -> None:
 
 
 def verify_install_tree(install_root: Path, windows_ml_root: Path) -> None:
-    require_no_link_like_entries(install_root)
+    entries = install_tree_entries(install_root)
     plugin_bin = install_root / PLUGIN_BIN
     plugin_licenses = install_root / PLUGIN_LICENSES
     package_native = windows_ml_root / PACKAGE_NATIVE
     for filename in RUNTIME_FILES:
         require_nonempty_file(plugin_bin / filename)
-    onnx_files = files_named(install_root, "onnxruntime.dll")
+    onnx_files = files_named(entries, "onnxruntime.dll")
     if onnx_files != [plugin_bin / "onnxruntime.dll"]:
         raise PackageContractError("install tree must contain exactly one onnxruntime.dll beside the plugin")
-    api_files = files_named(install_root, "Microsoft.Windows.AI.MachineLearning.dll")
+    api_files = files_named(entries, "Microsoft.Windows.AI.MachineLearning.dll")
     if api_files != [plugin_bin / "Microsoft.Windows.AI.MachineLearning.dll"]:
         raise PackageContractError(
             "install tree must contain exactly one Microsoft.Windows.AI.MachineLearning.dll beside the plugin"
         )
-    if files_named(install_root, "DirectML.dll"):
+    if files_named(entries, "DirectML.dll"):
         raise PackageContractError("DirectML.dll is prohibited in the Sprint 5 plugin package")
     require_same_file(plugin_bin / "onnxruntime.dll", package_native / "onnxruntime.dll")
     require_same_file(
@@ -159,7 +198,11 @@ def require_archive_same_file(
 
 def verify_archive(archive_path: Path, windows_ml_root: Path) -> None:
     package_native = windows_ml_root / PACKAGE_NATIVE
-    with zipfile.ZipFile(archive_path) as archive:
+    try:
+        archive = zipfile.ZipFile(archive_path)
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+        raise PackageContractError(f"could not read archive {archive_path}: {error}") from error
+    with archive:
         entries = archive_entries(archive)
         for filename in RUNTIME_FILES:
             require_archive_file(archive, entries, PLUGIN_BIN / filename)
