@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 
-**Status:** Approved architecture, awaiting written-spec review
+**Status:** Approved for implementation planning
 
 ## Goal
 
