@@ -149,6 +149,22 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("symbolic link is prohibited", result.stderr)
 
+    def test_directory_symbolic_link_in_install_tree_is_rejected_without_following_it(self):
+        linked_directory_target = self.fixture_root / "outside-install-tree"
+        linked_directory_target.mkdir()
+        linked_directory_target.joinpath("DirectML.dll").write_bytes(b"prohibited runtime")
+        linked_directory = self.install_root / "linked-directory"
+        try:
+            linked_directory.symlink_to(linked_directory_target, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"symbolic links are unavailable in this environment: {error}")
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("package-contract-error: directory link is prohibited", result.stderr)
+        self.assertIn("linked-directory", result.stderr)
+
     def _create_valid_fixture(self):
         native_directory = self.windows_ml_root / "runtimes/win-x64/native"
         native_directory.mkdir(parents=True)
