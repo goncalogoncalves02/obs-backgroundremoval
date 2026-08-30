@@ -62,10 +62,10 @@ def files_named(root: Path, filename: str) -> list[Path]:
     )
 
 
-def require_no_link_like_directories(root: Path) -> None:
+def require_no_link_like_entries(root: Path) -> None:
     for path in root.rglob("*"):
-        if is_link_like(path) and path.is_dir():
-            raise PackageContractError(f"directory link is prohibited: {path}")
+        if is_link_like(path):
+            raise PackageContractError(f"link is prohibited: {path}")
 
 
 def require_same_file(actual: Path, expected: Path) -> None:
@@ -76,7 +76,7 @@ def require_same_file(actual: Path, expected: Path) -> None:
 
 
 def verify_install_tree(install_root: Path, windows_ml_root: Path) -> None:
-    require_no_link_like_directories(install_root)
+    require_no_link_like_entries(install_root)
     plugin_bin = install_root / PLUGIN_BIN
     plugin_licenses = install_root / PLUGIN_LICENSES
     package_native = windows_ml_root / PACKAGE_NATIVE

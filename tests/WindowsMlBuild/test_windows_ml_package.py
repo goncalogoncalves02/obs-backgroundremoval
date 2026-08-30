@@ -147,7 +147,8 @@ class WindowsMlPackageTest(unittest.TestCase):
         result = self._verify()
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("symbolic link is prohibited", result.stderr)
+        self.assertIn("package-contract-error: link is prohibited", result.stderr)
+        self.assertIn("onnxruntime.dll", result.stderr)
 
     def test_directory_symbolic_link_in_install_tree_is_rejected_without_following_it(self):
         linked_directory_target = self.fixture_root / "outside-install-tree"
@@ -162,8 +163,34 @@ class WindowsMlPackageTest(unittest.TestCase):
         result = self._verify()
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("package-contract-error: directory link is prohibited", result.stderr)
+        self.assertIn("package-contract-error: link is prohibited", result.stderr)
         self.assertIn("linked-directory", result.stderr)
+
+    def test_broken_directory_symbolic_link_in_install_tree_is_rejected(self):
+        linked_directory = self.install_root / "broken-linked-directory"
+        try:
+            linked_directory.symlink_to(self.fixture_root / "missing-directory", target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"symbolic links are unavailable in this environment: {error}")
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("package-contract-error: link is prohibited", result.stderr)
+        self.assertIn("broken-linked-directory", result.stderr)
+
+    def test_self_referential_directory_symbolic_link_in_install_tree_is_rejected(self):
+        linked_directory = self.install_root / "self-linked-directory"
+        try:
+            linked_directory.symlink_to("self-linked-directory", target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"symbolic links are unavailable in this environment: {error}")
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("package-contract-error: link is prohibited", result.stderr)
+        self.assertIn("self-linked-directory", result.stderr)
 
     def _create_valid_fixture(self):
         native_directory = self.windows_ml_root / "runtimes/win-x64/native"
