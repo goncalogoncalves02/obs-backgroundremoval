@@ -302,7 +302,15 @@ set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTORCC ON)
 
 if(COMMAND collect_licenses)
   set(legal_header "${CMAKE_CURRENT_BINARY_DIR}/legal.hpp")
-  collect_licenses("${legal_header}")
+  if(WIN32)
+    collect_licenses(
+      "${legal_header}"
+      SKIP_VENDORED_ONNXRUNTIME
+      EXTRA_LICENSE_FILES "${WINDOWS_ML_LICENSE_FILE}" "${WINDOWS_ML_THIRD_PARTY_NOTICES_FILE}"
+    )
+  else()
+    collect_licenses("${legal_header}")
+  endif()
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE "${legal_header}")
   target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
@@ -398,6 +406,20 @@ elseif(MSVC)
     TARGETS "${CMAKE_PROJECT_NAME}"
     RUNTIME DESTINATION "${OBS_PLUGIN_BIN_DIR}"
     LIBRARY DESTINATION "${OBS_PLUGIN_BIN_DIR}"
+  )
+  install(
+    IMPORTED_RUNTIME_ARTIFACTS WindowsML::Api WindowsML::OnnxRuntime
+    RUNTIME DESTINATION "${OBS_PLUGIN_BIN_DIR}"
+  )
+  install(
+    FILES "${WINDOWS_ML_LICENSE_FILE}"
+    DESTINATION "${CMAKE_PROJECT_NAME}/licenses"
+    RENAME windows-ml-license.txt
+  )
+  install(
+    FILES "${WINDOWS_ML_THIRD_PARTY_NOTICES_FILE}"
+    DESTINATION "${CMAKE_PROJECT_NAME}/licenses"
+    RENAME windows-ml-third-party-notices.txt
   )
   install(FILES ${EFFECTS_FILES} DESTINATION "${OBS_PLUGIN_DATA_DIR}/effects")
   install(FILES ${LOCALE_FILES} DESTINATION "${OBS_PLUGIN_DATA_DIR}/locale")
