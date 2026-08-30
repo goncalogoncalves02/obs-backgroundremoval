@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import sys
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 PLUGIN_BIN = Path("obs-backgroundremoval/bin/64bit")
@@ -39,14 +39,27 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def is_link_like(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
+
+
 def require_nonempty_file(path: Path) -> None:
+    if is_link_like(path):
+        raise PackageContractError(f"symbolic link is prohibited: {path}")
     if not path.is_file() or path.stat().st_size == 0:
         raise PackageContractError(f"required non-empty file is missing: {path}")
 
 
 def files_named(root: Path, filename: str) -> list[Path]:
     expected = filename.casefold()
-    return sorted(path for path in root.rglob("*") if path.is_file() and path.name.casefold() == expected)
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if (path.is_file() or is_link_like(path)) and path.name.casefold() == expected
+    )
 
 
 def require_same_file(actual: Path, expected: Path) -> None:
@@ -65,6 +78,11 @@ def verify_install_tree(install_root: Path, windows_ml_root: Path) -> None:
     onnx_files = files_named(install_root, "onnxruntime.dll")
     if onnx_files != [plugin_bin / "onnxruntime.dll"]:
         raise PackageContractError("install tree must contain exactly one onnxruntime.dll beside the plugin")
+    api_files = files_named(install_root, "Microsoft.Windows.AI.MachineLearning.dll")
+    if api_files != [plugin_bin / "Microsoft.Windows.AI.MachineLearning.dll"]:
+        raise PackageContractError(
+            "install tree must contain exactly one Microsoft.Windows.AI.MachineLearning.dll beside the plugin"
+        )
     if files_named(install_root, "DirectML.dll"):
         raise PackageContractError("DirectML.dll is prohibited in the Sprint 5 plugin package")
     require_same_file(plugin_bin / "onnxruntime.dll", package_native / "onnxruntime.dll")
@@ -78,7 +96,7 @@ def verify_install_tree(install_root: Path, windows_ml_root: Path) -> None:
 
 def normalize_archive_path(name: str) -> PurePosixPath:
     path = PurePosixPath(name.replace("\\", "/"))
-    if path.is_absolute() or ".." in path.parts:
+    if path.is_absolute() or PureWindowsPath(name).drive or ".." in path.parts:
         raise PackageContractError(f"archive contains unsafe path: {name}")
     return path
 
@@ -142,6 +160,13 @@ def verify_archive(archive_path: Path, windows_ml_root: Path) -> None:
         onnx_files = archive_files_named(entries, "onnxruntime.dll")
         if [path for path, _ in onnx_files] != [PurePosixPath(PLUGIN_BIN / "onnxruntime.dll")]:
             raise PackageContractError("archive must contain exactly one onnxruntime.dll beside the plugin")
+        api_files = archive_files_named(entries, "Microsoft.Windows.AI.MachineLearning.dll")
+        if [path for path, _ in api_files] != [
+            PurePosixPath(PLUGIN_BIN / "Microsoft.Windows.AI.MachineLearning.dll")
+        ]:
+            raise PackageContractError(
+                "archive must contain exactly one Microsoft.Windows.AI.MachineLearning.dll beside the plugin"
+            )
         if archive_files_named(entries, "DirectML.dll"):
             raise PackageContractError("DirectML.dll is prohibited in the Sprint 5 plugin package")
 

@@ -106,6 +106,49 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("duplicate case-insensitive archive path", result.stderr)
 
+    def test_windows_drive_qualified_archive_path_is_rejected(self):
+        with zipfile.ZipFile(self.archive, "a") as package:
+            package.writestr(r"C:\\outside\\payload.dll", b"untrusted payload")
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("package-contract-error: archive contains unsafe path", result.stderr)
+
+    def test_nested_api_dll_in_install_tree_is_rejected(self):
+        nested_api = self.install_root / "nested" / "Microsoft.Windows.AI.MachineLearning.dll"
+        nested_api.parent.mkdir()
+        nested_api.write_bytes(b"second api")
+        self._write_archive()
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exactly one Microsoft.Windows.AI.MachineLearning.dll", result.stderr)
+
+    def test_nested_api_dll_in_archive_is_rejected(self):
+        with zipfile.ZipFile(self.archive, "a") as package:
+            package.writestr("nested/Microsoft.Windows.AI.MachineLearning.dll", b"second api")
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exactly one Microsoft.Windows.AI.MachineLearning.dll", result.stderr)
+
+    def test_symbolic_linked_runtime_in_install_tree_is_rejected(self):
+        runtime = self.install_root / PLUGIN_BIN / "onnxruntime.dll"
+        runtime.unlink()
+        try:
+            runtime.symlink_to(self.windows_ml_root / "runtimes/win-x64/native/onnxruntime.dll")
+        except OSError as error:
+            self.skipTest(f"symbolic links are unavailable in this environment: {error}")
+        self._write_archive()
+
+        result = self._verify()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("symbolic link is prohibited", result.stderr)
+
     def _create_valid_fixture(self):
         native_directory = self.windows_ml_root / "runtimes/win-x64/native"
         native_directory.mkdir(parents=True)
