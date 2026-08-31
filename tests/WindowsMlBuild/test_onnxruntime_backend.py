@@ -75,6 +75,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         result, _ = self._configure(
             system_name="Windows",
             expected_windows_ml_version="2.2.12",
+            windows_ml_one_shot_directory=decoy_package_root / "build" / "cmake",
             cmake_prefix_path=decoy_package_root / "build" / "cmake",
         )
 
@@ -87,22 +88,90 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
     def test_windows_package_rejects_a_package_redirect(self):
         requested_package_root = self._create_windows_ml_package(directory_name="requested-windows-ml")
         redirect_package_root = self._create_windows_ml_package(directory_name="redirect-windows-ml")
+        redirect_package_config = (
+            redirect_package_root
+            / "build"
+            / "cmake"
+            / "microsoft.windows.ai.machinelearning-config.cmake"
+        )
+        redirect_package_config.write_text(
+            redirect_package_config.read_text()
+            + "\nset(microsoft.windows.ai.machinelearning_DIR "
+            + f'"{requested_package_root / "build" / "cmake"}")\n'
+        )
 
         result, _ = self._configure(
             system_name="Windows",
             expected_windows_ml_version="2.2.12",
             windows_ml_directory=requested_package_root / "build" / "cmake",
-            redirect_package_config=redirect_package_root
-            / "build"
-            / "cmake"
-            / "microsoft.windows.ai.machinelearning-config.cmake",
+            redirect_package_config=redirect_package_config,
         )
 
         self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
         self.assertRegex(
             self._combined_output(result),
-            r"does not match requested\s+directory",
+            r"A CMake package redirect for Microsoft\.Windows\.AI\.MachineLearning is not\s+permitted",
         )
+
+    def test_windows_package_requires_the_one_shot_directory_on_every_configure(self):
+        invalid_directory = self.fixture_root / "legacy-invalid-package" / "build" / "cmake"
+        invalid_directory.mkdir(parents=True)
+        decoy_package_root = self._create_windows_ml_package(directory_name="legacy-decoy-windows-ml")
+
+        first_result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=invalid_directory,
+            windows_ml_one_shot_directory="",
+            cmake_prefix_path=decoy_package_root / "build" / "cmake",
+            legacy_find_package=True,
+        )
+        second_result, _ = self._configure(
+            expected_windows_ml_version="2.2.12",
+            legacy_find_package=False,
+        )
+
+        self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+        self.assertNotEqual(second_result.returncode, 0, self._diagnostic(second_result))
+        self.assertIn(
+            "WINDOWS_ML_PACKAGE_CONFIG_DIR must be supplied for every configure",
+            self._combined_output(second_result),
+        )
+
+    def test_windows_package_does_not_cache_the_resolved_directory(self):
+        package_root = self._create_windows_ml_package()
+        package_directory = package_root / "build" / "cmake"
+
+        first_result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_directory,
+        )
+        second_result, _ = self._configure(
+            expected_windows_ml_version="2.2.12",
+            windows_ml_one_shot_directory=package_directory,
+        )
+
+        self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+        self.assertNotEqual(second_result.returncode, 0, self._diagnostic(second_result))
+        self.assertIn(
+            "microsoft.windows.ai.machinelearning_DIR must be set explicitly",
+            self._combined_output(second_result),
+        )
+
+    def test_windows_package_requires_matching_explicit_directories(self):
+        requested_package_root = self._create_windows_ml_package(directory_name="requested-windows-ml")
+        other_package_root = self._create_windows_ml_package(directory_name="other-windows-ml")
+
+        result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=requested_package_root / "build" / "cmake",
+            windows_ml_one_shot_directory=other_package_root / "build" / "cmake",
+        )
+
+        self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertIn("must name the same directory", self._combined_output(result))
 
     def test_windows_package_rejects_a_different_version(self):
         package_root = self._create_windows_ml_package(version="2.2.13")
@@ -201,16 +270,22 @@ set_target_properties(WindowsML::Api PROPERTIES IMPORTED_LOCATION "${_fixture_ro
         system_name=None,
         expected_windows_ml_version="",
         windows_ml_directory=None,
+        windows_ml_one_shot_directory=None,
         onnxruntime_directory=None,
         cmake_prefix_path=None,
         redirect_package_config=None,
+        legacy_find_package=None,
     ):
         fixture_directory = self.fixture_root / "project"
-        fixture_directory.mkdir()
+        fixture_directory.mkdir(exist_ok=True)
         output = fixture_directory / "result.txt"
         fixture_directory.joinpath("CMakeLists.txt").write_text(
             """cmake_minimum_required(VERSION 3.28)
 project(onnxruntime_backend_contract NONE)
+if(LEGACY_FIND_PACKAGE)
+  find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
+  return()
+endif()
 if(REDIRECT_PACKAGE_CONFIG)
   configure_file(
     "${REDIRECT_PACKAGE_CONFIG}"
@@ -220,7 +295,11 @@ if(REDIRECT_PACKAGE_CONFIG)
 endif()
 list(APPEND CMAKE_MODULE_PATH "${BACKEND_MODULE_DIR}")
 include(onnxruntime_backend)
-add_onnxruntime_backend(OnnxRuntimeBackend "${EXPECTED_WINDOWS_ML_VERSION}")
+add_onnxruntime_backend(
+  OnnxRuntimeBackend
+  "${EXPECTED_WINDOWS_ML_VERSION}"
+  "${WINDOWS_ML_PACKAGE_CONFIG_DIR}"
+)
 get_target_property(backend_links OnnxRuntimeBackend INTERFACE_LINK_LIBRARIES)
 file(WRITE "${RESULT_FILE}" "links=${backend_links}\\n")
 if(WIN32)
@@ -242,12 +321,18 @@ endif()
             command.append(f"-DCMAKE_SYSTEM_NAME={system_name}")
         if windows_ml_directory:
             command.append(f"-Dmicrosoft.windows.ai.machinelearning_DIR={windows_ml_directory}")
+        if windows_ml_one_shot_directory is None:
+            windows_ml_one_shot_directory = windows_ml_directory
+        if windows_ml_one_shot_directory:
+            command.append(f"-DWINDOWS_ML_PACKAGE_CONFIG_DIR={windows_ml_one_shot_directory}")
         if onnxruntime_directory:
             command.append(f"-Donnxruntime_DIR={onnxruntime_directory}")
         if cmake_prefix_path:
             command.append(f"-DCMAKE_PREFIX_PATH={cmake_prefix_path}")
         if redirect_package_config:
             command.append(f"-DREDIRECT_PACKAGE_CONFIG={redirect_package_config}")
+        if legacy_find_package is not None:
+            command.append(f"-DLEGACY_FIND_PACKAGE={'ON' if legacy_find_package else 'OFF'}")
         result = subprocess.run(command, text=True, capture_output=True, check=False)
         return result, output
 

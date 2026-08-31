@@ -122,7 +122,7 @@ include(cmake/onnxruntime_backend)
 ### Package dependencies
 find_package(PkgConfig QUIET)
 
-add_onnxruntime_backend(OnnxRuntimeBackend "${windows_ml_version}")
+add_onnxruntime_backend(OnnxRuntimeBackend "${windows_ml_version}" "${WINDOWS_ML_PACKAGE_CONFIG_DIR}")
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)

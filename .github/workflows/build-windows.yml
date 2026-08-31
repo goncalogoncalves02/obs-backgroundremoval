@@ -338,6 +338,7 @@ jobs:
           cmake -S . -B build -G Ninja `
             "-DCMAKE_BUILD_TYPE=RelWithDebInfo" `
             "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH" `
+            "-DWINDOWS_ML_PACKAGE_CONFIG_DIR=$env:WINDOWS_ML_DIR" `
             "-Dmicrosoft.windows.ai.machinelearning_DIR=$env:WINDOWS_ML_DIR" `
             "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION"
 
