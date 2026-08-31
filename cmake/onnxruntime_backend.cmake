@@ -9,7 +9,54 @@ function(add_onnxruntime_backend TARGET_NAME EXPECTED_WINDOWS_ML_VERSION)
   add_library("${TARGET_NAME}" INTERFACE)
 
   if(WIN32)
-    find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
+    if(NOT DEFINED microsoft.windows.ai.machinelearning_DIR
+       OR "${microsoft.windows.ai.machinelearning_DIR}" STREQUAL "")
+      message(FATAL_ERROR "microsoft.windows.ai.machinelearning_DIR must be set explicitly.")
+    endif()
+
+    set(requested_windows_ml_directory "${microsoft.windows.ai.machinelearning_DIR}")
+    cmake_path(
+      ABSOLUTE_PATH
+      requested_windows_ml_directory
+      BASE_DIRECTORY "${CMAKE_BINARY_DIR}"
+      NORMALIZE
+    )
+    set(
+      microsoft.windows.ai.machinelearning_DIR
+      "${requested_windows_ml_directory}"
+      CACHE PATH
+      "Directory containing the Microsoft.Windows.AI.MachineLearning package configuration"
+      FORCE
+    )
+
+    find_package(
+      microsoft.windows.ai.machinelearning
+      CONFIG
+      REQUIRED
+      PATHS "${requested_windows_ml_directory}"
+      NO_DEFAULT_PATH
+    )
+
+    set(resolved_windows_ml_directory "${microsoft.windows.ai.machinelearning_DIR}")
+    cmake_path(
+      ABSOLUTE_PATH
+      resolved_windows_ml_directory
+      BASE_DIRECTORY "${CMAKE_BINARY_DIR}"
+      NORMALIZE
+    )
+    set(requested_windows_ml_directory_for_comparison "${requested_windows_ml_directory}")
+    set(resolved_windows_ml_directory_for_comparison "${resolved_windows_ml_directory}")
+    if(CMAKE_HOST_WIN32)
+      string(TOLOWER "${requested_windows_ml_directory_for_comparison}" requested_windows_ml_directory_for_comparison)
+      string(TOLOWER "${resolved_windows_ml_directory_for_comparison}" resolved_windows_ml_directory_for_comparison)
+    endif()
+    if(NOT resolved_windows_ml_directory_for_comparison STREQUAL requested_windows_ml_directory_for_comparison)
+      message(
+        FATAL_ERROR
+        "Resolved Microsoft.Windows.AI.MachineLearning package directory ${resolved_windows_ml_directory} "
+        "does not match requested directory ${requested_windows_ml_directory}."
+      )
+    endif()
 
     set(found_windows_ml_version undefined)
     if(DEFINED WINML_VERSION)
