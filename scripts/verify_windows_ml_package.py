@@ -4,10 +4,12 @@
 
 import argparse
 import hashlib
+import lzma
 import os
 import stat
 import sys
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
@@ -176,7 +178,11 @@ def require_archive_file(
     entry = entries.get(key)
     if entry is None:
         raise PackageContractError(f"required non-empty file is missing: {expected_path.as_posix()}")
-    data = archive.read(entry[1])
+    try:
+        data = archive.read(entry[1])
+    except (zipfile.BadZipFile, EOFError, OSError, zlib.error, lzma.LZMAError) as error:
+        detail = " ".join(str(error).splitlines())
+        raise PackageContractError(f"could not read archive entry {entry[1].filename!r}: {detail}") from error
     if not data:
         raise PackageContractError(f"required non-empty file is missing: {expected_path.as_posix()}")
     return data

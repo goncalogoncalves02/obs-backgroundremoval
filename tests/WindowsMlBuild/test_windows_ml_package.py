@@ -3,14 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import lzma
 import os
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -128,6 +131,40 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.assertEqual(result.stderr.count("package-contract-error:"), 1)
         self.assertIn("could not read archive", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_corrupt_stored_archive_crc_reports_one_entry_error(self):
+        entry_name = "obs-backgroundremoval/bin/64bit/obs-backgroundremoval.dll"
+        self._damage_archive_payload(entry_name, zipfile.ZIP_STORED, 0, 0)
+
+        self._assert_damaged_archive_error(entry_name, zipfile.BadZipFile)
+
+    def test_corrupt_deflated_archive_reports_one_entry_error(self):
+        entry_name = "obs-backgroundremoval/bin/64bit/onnxruntime.dll"
+        # DEFLATE block type 3 is reserved, so this cannot be a valid stream.
+        self._damage_archive_payload(entry_name, zipfile.ZIP_DEFLATED, 0, 0x07)
+
+        self._assert_damaged_archive_error(entry_name, zlib.error)
+
+    def test_corrupt_bzip2_archive_reports_one_entry_error(self):
+        entry_name = "obs-backgroundremoval/licenses/windows-ml-license.txt"
+        self._damage_archive_payload(entry_name, zipfile.ZIP_BZIP2, 0, 0)
+
+        self._assert_damaged_archive_error(entry_name, OSError)
+
+    def test_corrupt_lzma_archive_reports_one_entry_error(self):
+        entry_name = "obs-backgroundremoval/licenses/windows-ml-third-party-notices.txt"
+        # The first LZMA filter property follows its four-byte ZIP header.
+        self._damage_archive_payload(entry_name, zipfile.ZIP_LZMA, 4, 0xFF)
+
+        self._assert_damaged_archive_error(entry_name, lzma.LZMAError)
+
+    def test_unexpected_archive_read_programming_error_is_not_converted(self):
+        verifier = load_verifier_module()
+        with zipfile.ZipFile(self.archive) as archive:
+            entries = verifier.archive_entries(archive)
+            with mock.patch.object(archive, "read", side_effect=TypeError("unexpected programming error")):
+                with self.assertRaisesRegex(TypeError, "unexpected programming error"):
+                    verifier.require_archive_file(archive, entries, PLUGIN_BIN / "obs-backgroundremoval.dll")
 
     def test_file_read_error_becomes_package_contract_error(self):
         verifier = load_verifier_module()
@@ -304,8 +341,33 @@ class WindowsMlPackageTest(unittest.TestCase):
         )
         self._write_archive()
 
-    def _write_archive(self):
-        with zipfile.ZipFile(self.archive, "w") as package:
+    def _damage_archive_payload(self, entry_name, compression, payload_offset, replacement):
+        self._write_archive(compression)
+        valid_result = self._verify()
+        self.assertEqual(valid_result.returncode, 0, self._diagnostic(valid_result))
+        with zipfile.ZipFile(self.archive) as package:
+            entry = package.getinfo(entry_name)
+        contents = bytearray(self.archive.read_bytes())
+        name_length, extra_length = struct.unpack_from("<HH", contents, entry.header_offset + 26)
+        data_offset = entry.header_offset + 30 + name_length + extra_length
+        self.assertLess(payload_offset, entry.compress_size)
+        contents[data_offset + payload_offset] = replacement
+        self.archive.write_bytes(contents)
+
+    def _assert_damaged_archive_error(self, entry_name, expected_exception):
+        with zipfile.ZipFile(self.archive) as package:
+            with self.assertRaises(expected_exception):
+                package.read(entry_name)
+        result = self._verify()
+        self.assertEqual(result.returncode, 1, self._diagnostic(result))
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(len(result.stderr.splitlines()), 1, self._diagnostic(result))
+        self.assertTrue(result.stderr.startswith("package-contract-error:"), self._diagnostic(result))
+        self.assertIn(entry_name, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def _write_archive(self, compression=zipfile.ZIP_STORED):
+        with zipfile.ZipFile(self.archive, "w", compression=compression) as package:
             for path in sorted(self.install_root.rglob("*")):
                 if path.is_file():
                     package.write(path, path.relative_to(self.install_root).as_posix())
