@@ -36,6 +36,39 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
             f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root.resolve().as_posix()}\n",
         )
 
+    def test_root_backend_include_resolves_in_an_out_of_source_build(self):
+        project_directory = self.fixture_root / "root-project"
+        module_directory = project_directory / "cmake"
+        module_directory.mkdir(parents=True)
+        shutil.copy2(REPOSITORY_ROOT / "cmake" / "onnxruntime_backend.cmake", module_directory)
+        root_includes = [
+            line for line in REPOSITORY_ROOT.joinpath("CMakeLists.txt").read_text().splitlines()
+            if line.startswith("include(") and "onnxruntime_backend" in line
+        ]
+        self.assertEqual(len(root_includes), 1)
+        project_directory.joinpath("CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.28)\n"
+            "project(root_backend_include_contract NONE)\n"
+            "set(WIN32 OFF)\n"
+            + root_includes[0] + "\n"
+            'add_onnxruntime_backend(OnnxRuntimeBackend "" "")\n'
+            "get_target_property(backend_links OnnxRuntimeBackend INTERFACE_LINK_LIBRARIES)\n"
+            'file(WRITE "${CMAKE_BINARY_DIR}/result.txt" "${backend_links}\\n")\n'
+        )
+        package_root = self._create_onnxruntime_package()
+        build_directory = self.fixture_root / "root-build"
+        result = subprocess.run(
+            [self.cmake_command, "-S", str(project_directory), "-B", str(build_directory),
+             f"-Donnxruntime_DIR={package_root / 'cmake'}"],
+            cwd=self.fixture_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertEqual(build_directory.joinpath("result.txt").read_text(), "onnxruntime::onnxruntime\n")
+
     def test_valid_windows_package_reconfigures_without_repeating_inputs(self):
         package_root = self._create_windows_ml_package()
 

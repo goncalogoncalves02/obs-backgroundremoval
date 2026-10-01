@@ -117,7 +117,7 @@ function(check_onnxruntime_execution_provider result symbol)
   set(${result} "${found}" PARENT_SCOPE)
 endfunction()
 
-include(cmake/onnxruntime_backend)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/onnxruntime_backend.cmake")
 
 ### Package dependencies
 find_package(PkgConfig QUIET)

@@ -52,7 +52,9 @@ class OnnxRuntimeProviderDetectionTest(unittest.TestCase):
         # no provider-check implementation or required-library choice is copied.
         root_source = REPOSITORY_ROOT.joinpath("CMakeLists.txt").read_text()
         helpers_start = root_source.index("function(map_imported_executable_to_release ")
-        helpers_end = root_source.index("include(cmake/onnxruntime_backend)", helpers_start)
+        helpers_end = root_source.index(
+            'include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/onnxruntime_backend.cmake")', helpers_start,
+        )
         probes_start = root_source.index("if(NOT WIN32)\n  block(PROPAGATE onnxruntime_FOUND ")
         probes_end = root_source.index("### Plugin main", probes_start)
         project_directory.joinpath("root-provider-probes.cmake").write_text(
