@@ -3,13 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 function(collect_licenses output_header)
-  cmake_parse_arguments(
-    PARSE_ARGV 1
-    COLLECT
-    "SKIP_VENDORED_ONNXRUNTIME"
-    ""
-    "EXTRA_LICENSE_FILES"
-  )
+  cmake_parse_arguments(PARSE_ARGV 1 COLLECT "SKIP_VENDORED_ONNXRUNTIME" "" "EXTRA_LICENSE_FILES")
 
   set(license_files "${CMAKE_SOURCE_DIR}/LICENSE" "${CMAKE_SOURCE_DIR}/NOTICE")
 
@@ -28,7 +22,10 @@ function(collect_licenses output_header)
       message(FATAL_ERROR "Required extra license file does not exist: ${extra_license_file}")
     endif()
     get_filename_component(extra_license_filename "${extra_license_file}" NAME)
-    if(NOT extra_license_filename STREQUAL "license.txt" AND NOT extra_license_filename STREQUAL "ThirdPartyNotices.txt")
+    if(
+      NOT extra_license_filename STREQUAL "license.txt"
+      AND NOT extra_license_filename STREQUAL "ThirdPartyNotices.txt"
+    )
       message(FATAL_ERROR "Unsupported extra license filename: ${extra_license_filename}")
     endif()
     list(APPEND license_files "${extra_license_file}")
