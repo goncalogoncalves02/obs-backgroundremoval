@@ -33,7 +33,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, self._diagnostic(result))
         self.assertEqual(
             output.read_text(),
-            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root}\n",
+            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root.resolve().as_posix()}\n",
         )
 
     def test_valid_windows_package_reconfigures_without_repeating_inputs(self):
@@ -50,7 +50,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         self.assertEqual(second_result.returncode, 0, self._diagnostic(second_result))
         self.assertEqual(
             output.read_text(),
-            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root}\n",
+            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root.resolve().as_posix()}\n",
         )
 
     def test_valid_windows_package_survives_automatic_build_regeneration(self):
@@ -218,7 +218,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         self.assertEqual(stored_result.returncode, 0, self._diagnostic(stored_result))
         self.assertEqual(
             output.read_text(),
-            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={second_package_root}\n",
+            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={second_package_root.resolve().as_posix()}\n",
         )
 
     def test_partial_fresh_input_invalidates_the_validated_marker(self):
@@ -341,7 +341,10 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, self._diagnostic(result))
         cache = self.fixture_root.joinpath("build", "CMakeCache.txt").read_text()
         self.assertIn("OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA:INTERNAL=1\n", cache)
-        self.assertIn(f"OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY:INTERNAL={package_directory}\n", cache)
+        self.assertIn(
+            f"OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY:INTERNAL={package_directory.resolve().as_posix()}\n",
+            cache,
+        )
         self.assertNotRegex(cache, r"(?m)^(?:WINDOWS_ML_PACKAGE_CONFIG_DIR|microsoft\.windows\.ai\.machinelearning_DIR):")
 
     def _replace_cache_entry(self, name, entry_type, value):
@@ -440,14 +443,44 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(str(package_root / "license.txt"), self._combined_output(result))
+        self.assertIn((package_root.resolve() / "license.txt").as_posix(), self._combined_output(result))
 
     def test_non_windows_package_links_the_standalone_runtime(self):
         package_root = self._create_onnxruntime_package()
 
-        result, output = self._configure(onnxruntime_directory=package_root / "cmake")
+        result, output = self._configure(
+            fixture_win32=False,
+            onnxruntime_directory=package_root / "cmake",
+        )
 
         self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertEqual(output.read_text(), "links=onnxruntime::onnxruntime\n")
+
+    def test_windows_package_contracts_accept_noncanonical_fixture_paths(self):
+        for contract in (
+            self.test_windows_package_links_the_windows_ml_runtime_and_exports_its_root,
+            self.test_success_caches_only_internal_state_and_canonical_path,
+            self.test_windows_package_requires_its_license_file,
+        ):
+            with self.subTest(contract=contract.__name__):
+                self.setUp()
+                alias_directory = self.fixture_root / "path-alias"
+                alias_directory.mkdir()
+                self.fixture_root = alias_directory / ".."
+                contract()
+
+    def test_non_windows_contract_branch_is_independent_of_the_target_platform(self):
+        package_root = self._create_onnxruntime_package()
+
+        result, output = self._configure(
+            system_name="Windows",
+            fixture_win32=False,
+            onnxruntime_directory=package_root / "cmake",
+        )
+        repeated_result = self._reconfigure_without_flags()
+
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertEqual(repeated_result.returncode, 0, self._diagnostic(repeated_result))
         self.assertEqual(output.read_text(), "links=onnxruntime::onnxruntime\n")
 
     def _create_windows_ml_package(
@@ -507,6 +540,7 @@ set_target_properties(WindowsML::Api PROPERTIES IMPORTED_LOCATION "${_fixture_ro
         legacy_find_package=None,
         windows_ml_state_schema=None,
         windows_ml_state_directory=None,
+        fixture_win32=None,
     ):
         fixture_directory = self.fixture_root / "project"
         fixture_directory.mkdir(exist_ok=True)
@@ -514,6 +548,11 @@ set_target_properties(WindowsML::Api PROPERTIES IMPORTED_LOCATION "${_fixture_ro
         fixture_directory.joinpath("CMakeLists.txt").write_text(
             """cmake_minimum_required(VERSION 3.28)
 project(onnxruntime_backend_contract NONE)
+# Select only the contract branch; keep the generator and CMAKE_HOST_WIN32 real.
+# The cache entry persists across flag-free reconfiguration and regeneration.
+if(DEFINED FIXTURE_WIN32)
+  set(WIN32 "${FIXTURE_WIN32}")
+endif()
 if(LEGACY_FIND_PACKAGE)
   find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
   return()
@@ -551,6 +590,8 @@ endif()
         ]
         if system_name:
             command.append(f"-DCMAKE_SYSTEM_NAME={system_name}")
+        if fixture_win32 is not None:
+            command.append(f"-DFIXTURE_WIN32:BOOL={'ON' if fixture_win32 else 'OFF'}")
         if windows_ml_directory:
             command.append(f"-Dmicrosoft.windows.ai.machinelearning_DIR={windows_ml_directory}")
         if windows_ml_one_shot_directory is None:
