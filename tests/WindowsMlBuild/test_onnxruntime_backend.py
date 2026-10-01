@@ -36,6 +36,38 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
             f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root}\n",
         )
 
+    def test_valid_windows_package_reconfigures_without_repeating_inputs(self):
+        package_root = self._create_windows_ml_package()
+
+        first_result, output = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_root / "build" / "cmake",
+        )
+        second_result = self._reconfigure_without_flags()
+
+        self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+        self.assertEqual(second_result.returncode, 0, self._diagnostic(second_result))
+        self.assertEqual(
+            output.read_text(),
+            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root}\n",
+        )
+
+    def test_valid_windows_package_survives_automatic_build_regeneration(self):
+        package_root = self._create_windows_ml_package()
+
+        configure_result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_root / "build" / "cmake",
+        )
+        project_file = self.fixture_root / "project" / "CMakeLists.txt"
+        project_file.write_text(project_file.read_text() + "\n")
+        build_result = self._build()
+
+        self.assertEqual(configure_result.returncode, 0, self._diagnostic(configure_result))
+        self.assertEqual(build_result.returncode, 0, self._diagnostic(build_result))
+
     def test_windows_package_is_required(self):
         result, _ = self._configure(
             system_name="Windows",
@@ -113,7 +145,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
             r"A CMake package redirect for Microsoft\.Windows\.AI\.MachineLearning is not\s+permitted",
         )
 
-    def test_windows_package_requires_the_one_shot_directory_on_every_configure(self):
+    def test_legacy_cached_directory_without_a_validated_marker_is_rejected(self):
         invalid_directory = self.fixture_root / "legacy-invalid-package" / "build" / "cmake"
         invalid_directory.mkdir(parents=True)
         decoy_package_root = self._create_windows_ml_package(directory_name="legacy-decoy-windows-ml")
@@ -134,9 +166,207 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
         self.assertNotEqual(second_result.returncode, 0, self._diagnostic(second_result))
         self.assertIn(
-            "WINDOWS_ML_PACKAGE_CONFIG_DIR must be supplied for every configure",
+            "WINDOWS_ML_PACKAGE_CONFIG_DIR must be supplied",
             self._combined_output(second_result),
         )
+
+    def test_windows_package_rejects_an_unknown_state_marker_schema(self):
+        package_root = self._create_windows_ml_package()
+
+        result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_state_schema="unknown",
+            windows_ml_state_directory=package_root / "build" / "cmake",
+        )
+
+        self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertIn("unsupported Windows ML package state schema", self._combined_output(result))
+
+    def test_windows_package_rejects_a_corrupt_state_marker(self):
+        result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_state_schema="1",
+            windows_ml_state_directory=self.fixture_root / "missing-stored-package",
+        )
+
+        self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertRegex(
+            self._combined_output(result),
+            r"Could not find a package configuration file provided by\s+"
+            r"\"microsoft\.windows\.ai\.machinelearning\"",
+        )
+
+    def test_fresh_windows_package_inputs_update_the_validated_marker(self):
+        first_package_root = self._create_windows_ml_package(directory_name="first-windows-ml")
+        second_package_root = self._create_windows_ml_package(directory_name="second-windows-ml")
+
+        first_result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=first_package_root / "build" / "cmake",
+        )
+        update_result, output = self._configure(
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=second_package_root / "build" / "cmake",
+        )
+        stored_result = self._reconfigure_without_flags()
+
+        self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+        self.assertEqual(update_result.returncode, 0, self._diagnostic(update_result))
+        self.assertEqual(stored_result.returncode, 0, self._diagnostic(stored_result))
+        self.assertEqual(
+            output.read_text(),
+            f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={second_package_root}\n",
+        )
+
+    def test_partial_fresh_input_invalidates_the_validated_marker(self):
+        package_root = self._create_windows_ml_package()
+        package_directory = package_root / "build" / "cmake"
+
+        first_result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_directory,
+        )
+        partial_result, _ = self._configure(
+            expected_windows_ml_version="2.2.12",
+            windows_ml_one_shot_directory=package_directory,
+        )
+        stored_result = self._reconfigure_without_flags()
+
+        self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+        self.assertNotEqual(partial_result.returncode, 0, self._diagnostic(partial_result))
+        self.assertNotEqual(stored_result.returncode, 0, self._diagnostic(stored_result))
+        self.assertIn(
+            "No validated Windows ML package state is available",
+            self._combined_output(stored_result),
+        )
+
+    def test_invalid_fresh_inputs_cannot_reuse_a_previous_marker(self):
+        for invalid_input in ("directory_only", "empty", "missing", "mismatch", "version", "target", "legal"):
+            with self.subTest(invalid_input=invalid_input):
+                self.setUp()
+                package_root = self._create_windows_ml_package()
+                package_directory = package_root / "build" / "cmake"
+                first_result, _ = self._configure(
+                    system_name="Windows",
+                    expected_windows_ml_version="2.2.12",
+                    windows_ml_directory=package_directory,
+                )
+                self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+                options = {"windows_ml_directory": package_directory}
+                if invalid_input == "directory_only":
+                    options["windows_ml_one_shot_directory"] = ""
+                elif invalid_input == "empty":
+                    self._replace_cache_entry("WINDOWS_ML_PACKAGE_CONFIG_DIR", "PATH", "")
+                    options = {}
+                elif invalid_input == "missing":
+                    options = {"windows_ml_directory": self.fixture_root / "missing"}
+                elif invalid_input == "mismatch":
+                    other_root = self._create_windows_ml_package(directory_name="other")
+                    options["windows_ml_one_shot_directory"] = other_root / "build" / "cmake"
+                else:
+                    self._invalidate_package(package_root, invalid_input)
+                result, _ = self._configure(expected_windows_ml_version="2.2.12", **options)
+                stored_result = self._reconfigure_without_flags()
+                self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+                self.assertNotEqual(stored_result.returncode, 0, self._diagnostic(stored_result))
+                self.assertIn("No validated Windows ML package state", self._combined_output(stored_result))
+
+    def test_persisted_package_is_fully_validated_again(self):
+        for invalid_input in ("missing", "version", "target", "legal", "redirect", "decoy", "resolved_mismatch"):
+            with self.subTest(invalid_input=invalid_input):
+                self.setUp()
+                package_root = self._create_windows_ml_package()
+                package_directory = package_root / "build" / "cmake"
+                first_result, _ = self._configure(
+                    system_name="Windows",
+                    expected_windows_ml_version="2.2.12",
+                    windows_ml_directory=package_directory,
+                )
+                self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+                config_file = package_directory / "microsoft.windows.ai.machinelearning-config.cmake"
+                if invalid_input in ("missing", "decoy"):
+                    config_file.unlink()
+                    if invalid_input == "decoy":
+                        decoy = self._create_windows_ml_package(directory_name="decoy")
+                        self._replace_cache_entry("CMAKE_PREFIX_PATH", "PATH", decoy / "build" / "cmake")
+                elif invalid_input == "redirect":
+                    self._replace_cache_entry("REDIRECT_PACKAGE_CONFIG", "FILEPATH", config_file)
+                elif invalid_input == "resolved_mismatch":
+                    config_file.write_text(config_file.read_text() + '\nset(microsoft.windows.ai.machinelearning_DIR "' + str(self.fixture_root / "other") + '")\n')
+                else:
+                    self._invalidate_package(package_root, invalid_input)
+                result = self._reconfigure_without_flags()
+                self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+
+    def test_state_marker_requires_internal_entries_and_a_canonical_directory(self):
+        for invalid_marker in ("schema_type", "directory_type", "relative", "unnormalized", "empty", "no_directory", "no_schema"):
+            with self.subTest(invalid_marker=invalid_marker):
+                self.setUp()
+                package_root = self._create_windows_ml_package()
+                package_directory = package_root / "build" / "cmake"
+                first_result, _ = self._configure(
+                    system_name="Windows",
+                    expected_windows_ml_version="2.2.12",
+                    windows_ml_directory=package_directory,
+                )
+                self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
+                if invalid_marker == "schema_type":
+                    self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA", "STRING", "1")
+                elif invalid_marker == "directory_type":
+                    self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY", "PATH", package_directory)
+                elif invalid_marker == "relative":
+                    self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY", "INTERNAL", "../windows-ml/build/cmake")
+                elif invalid_marker == "unnormalized":
+                    self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY", "INTERNAL", str(package_directory) + "/../cmake")
+                elif invalid_marker == "empty":
+                    self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY", "INTERNAL", "")
+                else:
+                    entry = "OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY" if invalid_marker == "no_directory" else "OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA"
+                    self._replace_cache_entry(entry, None, None)
+                result = self._reconfigure_without_flags()
+                self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+
+    def test_success_caches_only_internal_state_and_canonical_path(self):
+        package_root = self._create_windows_ml_package()
+        package_directory = package_root / "build" / "cmake"
+        result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=str(package_directory) + "/../cmake",
+        )
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        cache = self.fixture_root.joinpath("build", "CMakeCache.txt").read_text()
+        self.assertIn("OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA:INTERNAL=1\n", cache)
+        self.assertIn(f"OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY:INTERNAL={package_directory}\n", cache)
+        self.assertNotRegex(cache, r"(?m)^(?:WINDOWS_ML_PACKAGE_CONFIG_DIR|microsoft\.windows\.ai\.machinelearning_DIR):")
+
+    def _replace_cache_entry(self, name, entry_type, value):
+        cache_file = self.fixture_root / "build" / "CMakeCache.txt"
+        lines = []
+        replaced = False
+        for line in cache_file.read_text().splitlines():
+            if line.startswith(name + ":"):
+                replaced = True
+                if entry_type is not None:
+                    lines.append(f"{name}:{entry_type}={value}")
+            else:
+                lines.append(line)
+        if entry_type is not None and not replaced:
+            lines.append(f"{name}:{entry_type}={value}")
+        cache_file.write_text("\n".join(lines) + "\n")
+
+    def _invalidate_package(self, package_root, invalid_input):
+        config_file = package_root / "build" / "cmake" / "microsoft.windows.ai.machinelearning-config.cmake"
+        if invalid_input == "version":
+            config_file.write_text(config_file.read_text().replace('"2.2.12"', '"2.2.13"'))
+        elif invalid_input == "target":
+            config_file.write_text(config_file.read_text().replace("WindowsML::OnnxRuntime", "Other::Runtime"))
+        elif invalid_input == "legal":
+            package_root.joinpath("ThirdPartyNotices.txt").unlink()
 
     def test_windows_package_does_not_cache_the_resolved_directory(self):
         package_root = self._create_windows_ml_package()
@@ -275,6 +505,8 @@ set_target_properties(WindowsML::Api PROPERTIES IMPORTED_LOCATION "${_fixture_ro
         cmake_prefix_path=None,
         redirect_package_config=None,
         legacy_find_package=None,
+        windows_ml_state_schema=None,
+        windows_ml_state_directory=None,
     ):
         fixture_directory = self.fixture_root / "project"
         fixture_directory.mkdir(exist_ok=True)
@@ -333,8 +565,34 @@ endif()
             command.append(f"-DREDIRECT_PACKAGE_CONFIG={redirect_package_config}")
         if legacy_find_package is not None:
             command.append(f"-DLEGACY_FIND_PACKAGE={'ON' if legacy_find_package else 'OFF'}")
+        if windows_ml_state_schema is not None:
+            command.append(f"-DOBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA:INTERNAL={windows_ml_state_schema}")
+        if windows_ml_state_directory is not None:
+            command.append(f"-DOBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY:INTERNAL={windows_ml_state_directory}")
         result = subprocess.run(command, text=True, capture_output=True, check=False)
         return result, output
+
+    def _reconfigure_without_flags(self):
+        return subprocess.run(
+            [
+                self.cmake_command,
+                "-S",
+                str(self.fixture_root / "project"),
+                "-B",
+                str(self.fixture_root / "build"),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _build(self):
+        return subprocess.run(
+            [self.cmake_command, "--build", str(self.fixture_root / "build")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
     @staticmethod
     def _combined_output(result):
