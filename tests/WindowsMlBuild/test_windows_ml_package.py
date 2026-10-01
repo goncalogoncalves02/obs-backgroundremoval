@@ -78,7 +78,7 @@ class WindowsMlPackageTest(unittest.TestCase):
         result = self._verify()
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("obs-backgroundremoval/bin/64bit", result.stderr)
+        self.assertIn(str(api_dll), result.stderr)
 
     def test_directml_dll_is_prohibited_even_when_nested(self):
         directml = self.install_root / "nested" / "runtime" / "DirectML.dll"
