@@ -44,9 +44,16 @@ class WindowsMlDependencyTest(unittest.TestCase):
                 / "microsoft.windows.ai.machinelearning-config.cmake"
             ).is_file()
         )
-        self.assertIn(f"WINDOWS_ML_PREFIX={expected_prefix}", self._combined_output(result))
+        reported_prefixes = [
+            line.partition("=")[2]
+            for line in self._combined_output(result).splitlines()
+            if line.startswith("WINDOWS_ML_PREFIX=")
+        ]
+        self.assertEqual(len(reported_prefixes), 1, self._diagnostic(result))
+        reported_prefix = reported_prefixes[0]
+        self.assertEqual(Path(reported_prefix).resolve(), expected_prefix.resolve())
         self.assertIn(
-            f"WINDOWS_ML_PREFIX<<EOS\n{expected_prefix}\nEOS\n",
+            f"WINDOWS_ML_PREFIX<<EOS\n{reported_prefix}\nEOS\n",
             self.fixture_root.joinpath("github-output.txt").read_text(),
         )
 
@@ -58,6 +65,13 @@ class WindowsMlDependencyTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
         self.assertIn("file DOWNLOAD HASH mismatch", self._combined_output(result))
         self.assertFalse(expected_prefix.exists())
+
+    def test_reports_the_extracted_prefix_with_a_noncanonical_fixture_path(self):
+        alias_directory = self.fixture_root / "path-alias"
+        alias_directory.mkdir()
+        self.fixture_root = alias_directory / ".."
+
+        self.test_downloads_windows_ml_with_a_valid_hash_extracts_its_config_and_reports_its_prefix()
 
     def _prepare_fixture(self, windows_ml_sha256=None):
         archives_directory = self.fixture_root / "archives"
