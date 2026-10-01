@@ -221,7 +221,7 @@ if(NOT WIN32)
     set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
 
     cmake_push_check_state(RESET)
-    set(CMAKE_REQUIRED_LIBRARIES OnnxRuntimeBackend)
+    set(CMAKE_REQUIRED_LIBRARIES onnxruntime::onnxruntime)
     set(CMAKE_REQUIRED_QUIET TRUE)
 
     check_onnxruntime_execution_provider(
