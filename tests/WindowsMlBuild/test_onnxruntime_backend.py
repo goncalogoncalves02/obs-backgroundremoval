@@ -101,6 +101,31 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         self.assertEqual(configure_result.returncode, 0, self._diagnostic(configure_result))
         self.assertEqual(build_result.returncode, 0, self._diagnostic(build_result))
 
+    def test_windows_ml_configless_targets_survive_the_global_release_mapping(self):
+        package_root = self._create_windows_ml_package()
+        configure_result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_root / "build" / "cmake",
+            imported_config_contract=True,
+        )
+        self.assertEqual(configure_result.returncode, 0, self._diagnostic(configure_result))
+        repeated_result = self._reconfigure_without_flags()
+        self.assertEqual(repeated_result.returncode, 0, self._diagnostic(repeated_result))
+        project_file = self.fixture_root / "project" / "CMakeLists.txt"
+        project_file.write_text(project_file.read_text() + "\n")
+        build_result = self._build()
+        self.assertEqual(build_result.returncode, 0, self._diagnostic(build_result))
+        root = package_root.resolve().as_posix()
+        self.assertEqual(
+            self.fixture_root.joinpath("build", "imported-paths-RelWithDebInfo.txt").read_text(),
+            f"api={root}/runtimes/win-x64/native/Microsoft.Windows.AI.MachineLearning.dll\n"
+            f"api_lib={root}/lib/native/x64/Microsoft.Windows.AI.MachineLearning.lib\n"
+            f"ort={root}/runtimes/win-x64/native/onnxruntime.dll\n"
+            f"ort_lib={root}/lib/native/x64/onnxruntime.lib\n"
+            f"unrelated={root}/control-release.dll\nglobal=Release\n",
+        )
+
     def test_windows_package_is_required(self):
         result, _ = self._configure(
             system_name="Windows",
@@ -526,10 +551,14 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         package_root = self.fixture_root / directory_name
         config_directory = package_root / "build" / "cmake"
         native_directory = package_root / "runtimes" / "win-x64" / "native"
+        library_directory = package_root / "lib" / "native" / "x64"
         config_directory.mkdir(parents=True)
         native_directory.mkdir(parents=True)
+        library_directory.mkdir(parents=True)
         native_directory.joinpath("Microsoft.Windows.AI.MachineLearning.dll").write_bytes(b"api")
         native_directory.joinpath("onnxruntime.dll").write_bytes(b"onnxruntime")
+        library_directory.joinpath("Microsoft.Windows.AI.MachineLearning.lib").write_bytes(b"api import library")
+        library_directory.joinpath("onnxruntime.lib").write_bytes(b"onnxruntime import library")
         if include_license:
             package_root.joinpath("license.txt").write_text("license\n")
         package_root.joinpath("ThirdPartyNotices.txt").write_text("notices\n")
@@ -537,6 +566,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         api_target = "" if not include_api_target else """
 add_library(WindowsML::Api SHARED IMPORTED)
 set_target_properties(WindowsML::Api PROPERTIES IMPORTED_LOCATION "${_fixture_root}/runtimes/win-x64/native/Microsoft.Windows.AI.MachineLearning.dll")
+set_target_properties(WindowsML::Api PROPERTIES IMPORTED_IMPLIB "${_fixture_root}/lib/native/x64/Microsoft.Windows.AI.MachineLearning.lib")
 """
         config_directory.joinpath("microsoft.windows.ai.machinelearning-config.cmake").write_text(
             "\n".join(
@@ -546,6 +576,7 @@ set_target_properties(WindowsML::Api PROPERTIES IMPORTED_LOCATION "${_fixture_ro
                     api_target.strip(),
                     'add_library(WindowsML::OnnxRuntime SHARED IMPORTED)',
                     'set_target_properties(WindowsML::OnnxRuntime PROPERTIES IMPORTED_LOCATION "${_fixture_root}/runtimes/win-x64/native/onnxruntime.dll")',
+                    'set_target_properties(WindowsML::OnnxRuntime PROPERTIES IMPORTED_IMPLIB "${_fixture_root}/lib/native/x64/onnxruntime.lib")',
                     "",
                 )
             )
@@ -574,6 +605,7 @@ set_target_properties(WindowsML::Api PROPERTIES IMPORTED_LOCATION "${_fixture_ro
         windows_ml_state_schema=None,
         windows_ml_state_directory=None,
         fixture_win32=None,
+        imported_config_contract=False,
     ):
         fixture_directory = self.fixture_root / "project"
         fixture_directory.mkdir(exist_ok=True)
@@ -585,6 +617,9 @@ project(onnxruntime_backend_contract NONE)
 # The cache entry persists across flag-free reconfiguration and regeneration.
 if(DEFINED FIXTURE_WIN32)
   set(WIN32 "${FIXTURE_WIN32}")
+endif()
+if(IMPORTED_CONFIG_CONTRACT)
+  set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
 endif()
 if(LEGACY_FIND_PACKAGE)
   find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
@@ -609,6 +644,18 @@ file(WRITE "${RESULT_FILE}" "links=${backend_links}\\n")
 if(WIN32)
   file(APPEND "${RESULT_FILE}" "root=${WINDOWS_ML_PACKAGE_ROOT}\\n")
 endif()
+if(IMPORTED_CONFIG_CONTRACT)
+  add_library(FixtureRelease SHARED IMPORTED)
+  set_target_properties(FixtureRelease PROPERTIES
+    IMPORTED_CONFIGURATIONS RELEASE
+    IMPORTED_LOCATION "${WINDOWS_ML_PACKAGE_ROOT}/wrong-control.dll"
+    IMPORTED_LOCATION_RELEASE "${WINDOWS_ML_PACKAGE_ROOT}/control-release.dll"
+    IMPORTED_IMPLIB_RELEASE "${WINDOWS_ML_PACKAGE_ROOT}/control-release.lib"
+  )
+  file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/imported-paths-$<CONFIG>.txt"
+    CONTENT "api=$<TARGET_FILE:WindowsML::Api>\\napi_lib=$<TARGET_LINKER_FILE:WindowsML::Api>\\nort=$<TARGET_FILE:WindowsML::OnnxRuntime>\\nort_lib=$<TARGET_LINKER_FILE:WindowsML::OnnxRuntime>\\nunrelated=$<TARGET_FILE:FixtureRelease>\\nglobal=${CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO}\\n"
+  )
+endif()
 """
         )
         command = [
@@ -625,6 +672,8 @@ endif()
             command.append(f"-DCMAKE_SYSTEM_NAME={system_name}")
         if fixture_win32 is not None:
             command.append(f"-DFIXTURE_WIN32:BOOL={'ON' if fixture_win32 else 'OFF'}")
+        if imported_config_contract:
+            command.extend(["-DIMPORTED_CONFIG_CONTRACT:BOOL=ON", "-DCMAKE_BUILD_TYPE=RelWithDebInfo"])
         if windows_ml_directory:
             command.append(f"-Dmicrosoft.windows.ai.machinelearning_DIR={windows_ml_directory}")
         if windows_ml_one_shot_directory is None:

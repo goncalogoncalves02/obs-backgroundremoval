@@ -181,6 +181,10 @@ function(add_onnxruntime_backend TARGET_NAME EXPECTED_WINDOWS_ML_VERSION REQUEST
       endif()
     endforeach()
 
+    # The pinned package has configuration-less DLL and import-library locations.
+    # Override only these targets' inherited Release mapping for RelWithDebInfo.
+    set_target_properties(WindowsML::Api WindowsML::OnnxRuntime PROPERTIES MAP_IMPORTED_CONFIG_RELWITHDEBINFO "")
+
     set(
       OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA
       "${windows_ml_package_state_schema_version}"
