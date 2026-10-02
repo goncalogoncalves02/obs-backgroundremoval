@@ -22,6 +22,15 @@ ProviderActivationAction activation_action(ProviderReadyState ready_state) noexc
 	return ProviderActivationAction::UnavailableWithoutActivation;
 }
 
+ProviderReadyState ensure_installed_provider_ready(ProviderReadyState initial, InstalledProviderActivation &activation)
+{
+	if (initial != ProviderReadyState::NotReady) {
+		return initial;
+	}
+	activation.activate();
+	return activation.read_state();
+}
+
 void assign_sanitized_diagnostic(std::string &destination, std::string_view first, std::string_view second,
 				 std::string_view third) noexcept
 {

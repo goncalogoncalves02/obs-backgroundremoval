@@ -19,11 +19,8 @@ add_library(windows-ml-smoke-benchmark-report STATIC benchmark-report.cpp)
 target_compile_features(windows-ml-smoke-benchmark-report PUBLIC cxx_std_20)
 target_include_directories(windows-ml-smoke-benchmark-report PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
-add_library(windows-ml-smoke-provider-policy STATIC ../../src/ort-utils/windows-ml-provider-policy.cpp)
-target_compile_features(windows-ml-smoke-provider-policy PUBLIC cxx_std_20)
-target_include_directories(
-  windows-ml-smoke-provider-policy PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../src/ort-utils"
-)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/windows_ml_sessions.cmake")
+add_windows_ml_policy_targets()
 
 add_library(windows-ml-smoke-provider-report STATIC provider-report.cpp)
 target_compile_features(windows-ml-smoke-provider-report PUBLIC cxx_std_20)
@@ -50,11 +47,15 @@ if(WINDOWS_ML_SMOKE_CLI_TESTS_ONLY)
   add_executable(windows-ml-smoke-provider-policy-test tests/provider-policy-test.cpp)
   target_link_libraries(windows-ml-smoke-provider-policy-test PRIVATE windows-ml-smoke-provider-policy)
 
+  add_executable(windows-ml-session-policy-test tests/session-policy-test.cpp)
+  target_link_libraries(windows-ml-session-policy-test PRIVATE windows-ml-session-policy)
+
   add_test(NAME windows-ml-smoke-cli COMMAND windows-ml-smoke-cli-test)
   add_test(NAME windows-ml-smoke-benchmark COMMAND windows-ml-smoke-benchmark-test)
   add_test(NAME windows-ml-smoke-benchmark-report COMMAND windows-ml-smoke-benchmark-report-test)
   add_test(NAME windows-ml-smoke-provider-report COMMAND windows-ml-smoke-provider-report-test)
   add_test(NAME windows-ml-smoke-provider-policy COMMAND windows-ml-smoke-provider-policy-test)
+  add_test(NAME windows-ml-session-policy COMMAND windows-ml-session-policy-test)
   return()
 endif()
 
@@ -72,8 +73,14 @@ target_compile_definitions(windows-ml-smoke PRIVATE WINDOWS_ML_PACKAGE_VERSION="
 target_include_directories(windows-ml-smoke PRIVATE ../../src/ort-utils)
 target_link_libraries(
   windows-ml-smoke
-  PRIVATE windows-ml-smoke-cli windows-ml-smoke-benchmark windows-ml-smoke-benchmark-report
-          windows-ml-smoke-provider-policy windows-ml-smoke-provider-report WindowsML::Api WindowsML::OnnxRuntime
+  PRIVATE
+    windows-ml-smoke-cli
+    windows-ml-smoke-benchmark
+    windows-ml-smoke-benchmark-report
+    windows-ml-smoke-provider-policy
+    windows-ml-smoke-provider-report
+    WindowsML::Api
+    WindowsML::OnnxRuntime
 )
 
 add_custom_command(

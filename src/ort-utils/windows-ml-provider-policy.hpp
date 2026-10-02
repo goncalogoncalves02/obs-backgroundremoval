@@ -21,6 +21,16 @@ enum class ProviderActivationAction {
 	UnavailableWithoutActivation,
 };
 
+class InstalledProviderActivation {
+public:
+	virtual ~InstalledProviderActivation() = default;
+	virtual void activate() = 0;
+	[[nodiscard]] virtual ProviderReadyState read_state() = 0;
+};
+
+[[nodiscard]] ProviderReadyState ensure_installed_provider_ready(ProviderReadyState initial,
+								 InstalledProviderActivation &activation);
+
 [[nodiscard]] ProviderActivationAction activation_action(ProviderReadyState ready_state) noexcept;
 
 void assign_sanitized_diagnostic(std::string &destination, std::string_view first, std::string_view second = {},
