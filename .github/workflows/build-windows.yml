@@ -410,6 +410,17 @@ jobs:
           $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
           $env:Path = "$CMAKE_BINDIR;$env:Path"
+          $ADAPTER_DIRECTORY = Join-Path $env:GITHUB_WORKSPACE 'build\tests\WindowsMlSession'
+          $ADAPTER_EXE = Join-Path $ADAPTER_DIRECTORY 'windows-ml-plugin-session.exe'
+          Write-Output 'Staged native adapter DLLs:'
+          Get-ChildItem -LiteralPath $ADAPTER_DIRECTORY -Filter '*.dll' -File | Select-Object -ExpandProperty Name
+          dumpbin /dependents $ADAPTER_EXE
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect native adapter dependencies.' }
+          $OBS_DLL = Join-Path $ADAPTER_DIRECTORY 'obs.dll'
+          if (Test-Path -LiteralPath $OBS_DLL -PathType Leaf) {
+            dumpbin /dependents $OBS_DLL
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect adjacent OBS dependencies.' }
+          }
           ctest --test-dir build -C RelWithDebInfo -R '^windows-ml-plugin-session$' --output-on-failure --no-tests=error --verbose --interactive-debug-mode 0
           if ($LASTEXITCODE -ne 0) { throw 'Production plugin session adapter tests failed.' }
 
