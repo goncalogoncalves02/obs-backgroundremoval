@@ -72,6 +72,26 @@ resolve_windows_ml_directml_dll("${windows_ml_package_root}" WINDOWS_ML_DIRECTML
 enable_testing()
 
 add_windows_ml_session_core()
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/../../data/models/mediapipe.onnx" session_check_model_sha256)
+file(SIZE "${CMAKE_CURRENT_SOURCE_DIR}/../../data/models/mediapipe.onnx" session_check_model_size)
+add_executable(windows-ml-session-check production-session-check.cpp)
+target_compile_features(windows-ml-session-check PRIVATE cxx_std_20)
+target_compile_definitions(
+  windows-ml-session-check
+  PRIVATE
+    WINDOWS_ML_PACKAGE_VERSION="2.2.12"
+    WINDOWS_ML_MEDIAPIPE_SHA256="${session_check_model_sha256}"
+    WINDOWS_ML_MEDIAPIPE_SIZE=${session_check_model_size}
+)
+target_link_libraries(windows-ml-session-check PRIVATE windows-ml-session-core windows-ml-smoke-benchmark Crypt32)
+stage_windows_ml_runtime(windows-ml-session-check)
+add_test(
+  NAME windows-ml-session-check-cpu
+  COMMAND
+    windows-ml-session-check --provider cpu --model "${CMAKE_CURRENT_SOURCE_DIR}/../../data/models/mediapipe.onnx"
+    --iterations 100 --cycles 3 --require-effective
+)
+
 add_executable(windows-ml-session-core-test tests/session-core-test.cpp)
 target_link_libraries(windows-ml-session-core-test PRIVATE windows-ml-session-core)
 stage_windows_ml_runtime(windows-ml-session-core-test)
