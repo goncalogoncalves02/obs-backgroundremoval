@@ -120,7 +120,8 @@ void enhance_filter_activate(void *data)
 
 	std::shared_ptr<enhance_filter> tf = *ptr;
 	if (tf) {
-		tf->isDisabled = false;
+		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		tf->isDisabled = !tf->session || !tf->model;
 	}
 }
 
@@ -151,27 +152,38 @@ void enhance_filter_update(void *data, obs_data_t *settings)
 		return;
 	}
 
+	tf->isDisabled = true;
 	tf->blendFactor = (float)obs_data_get_double(settings, "blend");
 	const uint32_t newNumThreads = (uint32_t)obs_data_get_int(settings, "numThreads");
 	const std::string newModel = obs_data_get_string(settings, "model_select");
 	const std::string newUseGpu = obs_data_get_string(settings, "useGPU");
 
-	if (tf->modelSelection.empty() || tf->modelSelection != newModel || tf->useGPU != newUseGpu ||
-	    tf->numThreads != newNumThreads) {
-		// Lock modelMutex to prevent race condition with video_tick
+	{
+		// Serialize settings comparisons, replacement and inference with the subclass mutex.
 		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		if (!tf->session || tf->modelSelection.empty() || tf->modelSelection != newModel ||
+		    tf->useGPU != newUseGpu || tf->numThreads != newNumThreads) {
 
-		tf->numThreads = newNumThreads;
-		tf->modelSelection = newModel;
-		if (tf->modelSelection == MODEL_ENHANCE_TBEFN) {
-			tf->model.reset(new ModelTBEFN);
-		} else if (tf->modelSelection == MODEL_ENHANCE_URETINEX) {
-			tf->model.reset(new ModelURetinex);
-		} else {
-			tf->model.reset(new ModelBCHW);
+			tf->numThreads = newNumThreads;
+			tf->modelSelection = newModel;
+			if (tf->modelSelection == MODEL_ENHANCE_TBEFN) {
+				tf->model.reset(new ModelTBEFN);
+			} else if (tf->modelSelection == MODEL_ENHANCE_URETINEX) {
+				tf->model.reset(new ModelURetinex);
+			} else {
+				tf->model.reset(new ModelBCHW);
+			}
+			tf->useGPU = newUseGpu;
+			const int ortSessionResult = createOrtSession(tf.get());
+			if (ortSessionResult != OBS_BGREMOVAL_ORT_SESSION_SUCCESS) {
+				obs_log(LOG_ERROR, "Failed to create ONNXRuntime session. Error code: %d",
+					ortSessionResult);
+				tf->isDisabled = true;
+				resetOrtSessionData(*tf);
+				tf->model.reset();
+				return;
+			}
 		}
-		tf->useGPU = newUseGpu;
-		createOrtSession(tf.get());
 	}
 
 	if (tf->blendEffect == nullptr) {
@@ -182,6 +194,10 @@ void enhance_filter_update(void *data, obs_data_t *settings)
 		bfree(effect_path);
 
 		obs_leave_graphics();
+	}
+	{
+		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		tf->isDisabled = !tf->session || !tf->model;
 	}
 }
 
@@ -273,6 +289,10 @@ void enhance_filter_video_tick(void *data, float seconds)
 	cv::Mat outputImage;
 	{
 		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		// Initialization may have failed while this inference waited for the mutex.
+		if (tf->isDisabled || !tf->session || !tf->model) {
+			return;
+		}
 		try {
 			if (!runFilterModelInference(tf.get(), imageBGRA, outputImage)) {
 				return;

@@ -325,45 +325,49 @@ void background_filter_update(void *data, obs_data_t *settings)
 	const std::string newModel = obs_data_get_string(settings, "model_select");
 	const uint32_t newNumThreads = (uint32_t)obs_data_get_int(settings, "numThreads");
 
-	if (tf->modelSelection.empty() || tf->modelSelection != newModel || tf->useGPU != newUseGpu ||
-	    tf->numThreads != newNumThreads) {
-		// lock modelMutex
+	{
+		// Serialize settings comparisons, replacement and inference with the subclass mutex.
 		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		if (!tf->session || tf->modelSelection.empty() || tf->modelSelection != newModel ||
+		    tf->useGPU != newUseGpu || tf->numThreads != newNumThreads) {
 
-		// Re-initialize model if it's not already the selected one or switching inference device
-		tf->modelSelection = newModel;
-		tf->useGPU = newUseGpu;
-		tf->numThreads = newNumThreads;
+			// Re-initialize model if it's not already the selected one or switching inference device
+			tf->modelSelection = newModel;
+			tf->useGPU = newUseGpu;
+			tf->numThreads = newNumThreads;
 
-		if (tf->modelSelection == MODEL_SINET) {
-			tf->model.reset(new ModelSINET);
-		}
-		if (tf->modelSelection == MODEL_SELFIE) {
-			tf->model.reset(new ModelSelfie);
-		}
-		if (tf->modelSelection == MODEL_SELFIE_MULTICLASS) {
-			tf->model.reset(new ModelSelfieMulticlass);
-		}
-		if (tf->modelSelection == MODEL_MEDIAPIPE) {
-			tf->model.reset(new ModelMediaPipe);
-		}
-		if (tf->modelSelection == MODEL_RVM) {
-			tf->model.reset(new ModelRVM);
-		}
-		if (tf->modelSelection == MODEL_PPHUMANSEG) {
-			tf->model.reset(new ModelPPHumanSeg);
-		}
-		if (tf->modelSelection == MODEL_DEPTH_TCMONODEPTH) {
-			tf->model.reset(new ModelTCMonoDepth);
-		}
+			if (tf->modelSelection == MODEL_SINET) {
+				tf->model.reset(new ModelSINET);
+			}
+			if (tf->modelSelection == MODEL_SELFIE) {
+				tf->model.reset(new ModelSelfie);
+			}
+			if (tf->modelSelection == MODEL_SELFIE_MULTICLASS) {
+				tf->model.reset(new ModelSelfieMulticlass);
+			}
+			if (tf->modelSelection == MODEL_MEDIAPIPE) {
+				tf->model.reset(new ModelMediaPipe);
+			}
+			if (tf->modelSelection == MODEL_RVM) {
+				tf->model.reset(new ModelRVM);
+			}
+			if (tf->modelSelection == MODEL_PPHUMANSEG) {
+				tf->model.reset(new ModelPPHumanSeg);
+			}
+			if (tf->modelSelection == MODEL_DEPTH_TCMONODEPTH) {
+				tf->model.reset(new ModelTCMonoDepth);
+			}
 
-		int ortSessionResult = createOrtSession(tf.get());
-		if (ortSessionResult != OBS_BGREMOVAL_ORT_SESSION_SUCCESS) {
-			obs_log(LOG_ERROR, "Failed to create ONNXRuntime session. Error code: %d", ortSessionResult);
-			// disable filter
-			tf->isDisabled = true;
-			tf->model.reset();
-			return;
+			int ortSessionResult = createOrtSession(tf.get());
+			if (ortSessionResult != OBS_BGREMOVAL_ORT_SESSION_SUCCESS) {
+				obs_log(LOG_ERROR, "Failed to create ONNXRuntime session. Error code: %d",
+					ortSessionResult);
+				// disable filter
+				tf->isDisabled = true;
+				resetOrtSessionData(*tf);
+				tf->model.reset();
+				return;
+			}
 		}
 	}
 
@@ -408,8 +412,11 @@ void background_filter_update(void *data, obs_data_t *settings)
 	obs_log(LOG_INFO, "  Model file path: %s", tf->modelFilepath.c_str());
 #endif
 
-	// enable
-	tf->isDisabled = false;
+	// Enable only a completely initialized session.
+	{
+		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		tf->isDisabled = !tf->session || !tf->model;
+	}
 }
 
 void background_filter_activate(void *data)
@@ -421,8 +428,9 @@ void background_filter_activate(void *data)
 
 	std::shared_ptr<background_removal_filter> tf = *ptr;
 	if (tf && tf->stopWhenSourceIsInactive) {
+		std::unique_lock<std::mutex> lock(tf->modelMutex);
 		obs_log(LOG_INFO, "Background filter activated");
-		tf->isDisabled = false;
+		tf->isDisabled = !tf->session || !tf->model;
 	}
 }
 
@@ -589,6 +597,10 @@ void background_filter_video_tick(void *data, float seconds)
 
 			{
 				std::unique_lock<std::mutex> lock(tf->modelMutex);
+				// Recheck after waiting for initialization, which may have failed.
+				if (tf->isDisabled || !tf->session || !tf->model) {
+					return;
+				}
 				// Process the image to find the mask.
 				processImageForBackground(tf.get(), imageBGRA, backgroundMask);
 			}

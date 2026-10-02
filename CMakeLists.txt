@@ -264,6 +264,12 @@ if(NOT WIN32)
   endblock()
 endif()
 
+if(WIN32)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows_ml_sessions.cmake")
+  add_windows_ml_session_core()
+  target_link_libraries(windows-ml-session-core PRIVATE BuildOptions)
+endif()
+
 ### Plugin main
 add_subdirectory(vendor/josuttis-jthread)
 add_subdirectory(src/UpdateConfig)
@@ -297,6 +303,10 @@ target_sources(
     src/background-filter.cpp
     src/enhance-filter.cpp
 )
+
+if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE windows-ml-session-core)
+endif()
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTORCC ON)
 
