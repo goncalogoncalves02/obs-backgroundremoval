@@ -547,11 +547,6 @@ void background_filter_video_tick(void *data, float seconds)
 		return;
 	}
 
-	if (!tf->model) {
-		obs_log(LOG_ERROR, "Model is not initialized");
-		return;
-	}
-
 	cv::Mat imageBGRA;
 	{
 		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
