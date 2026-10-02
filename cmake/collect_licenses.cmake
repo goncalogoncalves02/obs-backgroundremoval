@@ -3,15 +3,33 @@
 # SPDX-License-Identifier: Apache-2.0
 
 function(collect_licenses output_header)
+  cmake_parse_arguments(PARSE_ARGV 1 COLLECT "SKIP_VENDORED_ONNXRUNTIME" "" "EXTRA_LICENSE_FILES")
+
   set(license_files "${CMAKE_SOURCE_DIR}/LICENSE" "${CMAKE_SOURCE_DIR}/NOTICE")
 
-  if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/LICENSE")
-    list(APPEND license_files "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/LICENSE")
+  if(NOT COLLECT_SKIP_VENDORED_ONNXRUNTIME)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/LICENSE")
+      list(APPEND license_files "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/LICENSE")
+    endif()
+
+    if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/ThirdPartyNotices.txt")
+      list(APPEND license_files "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/ThirdPartyNotices.txt")
+    endif()
   endif()
 
-  if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/ThirdPartyNotices.txt")
-    list(APPEND license_files "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/ThirdPartyNotices.txt")
-  endif()
+  foreach(extra_license_file IN LISTS COLLECT_EXTRA_LICENSE_FILES)
+    if(NOT EXISTS "${extra_license_file}")
+      message(FATAL_ERROR "Required extra license file does not exist: ${extra_license_file}")
+    endif()
+    get_filename_component(extra_license_filename "${extra_license_file}" NAME)
+    if(
+      NOT extra_license_filename STREQUAL "license.txt"
+      AND NOT extra_license_filename STREQUAL "ThirdPartyNotices.txt"
+    )
+      message(FATAL_ERROR "Unsupported extra license filename: ${extra_license_filename}")
+    endif()
+    list(APPEND license_files "${extra_license_file}")
+  endforeach()
 
   foreach(prefix IN LISTS CMAKE_PREFIX_PATH)
     file(GLOB vcpkg_license_files "${prefix}/share/*/copyright")
@@ -35,6 +53,13 @@ function(collect_licenses output_header)
       set(license_name "onnxruntime")
     elseif(license_file STREQUAL "${CMAKE_SOURCE_DIR}/vendor/onnxruntime/ThirdPartyNotices.txt")
       set(license_name "onnxruntime third-party notices")
+    elseif(license_file IN_LIST COLLECT_EXTRA_LICENSE_FILES)
+      get_filename_component(extra_license_filename "${license_file}" NAME)
+      if(extra_license_filename STREQUAL "license.txt")
+        set(license_name "Microsoft.Windows.AI.MachineLearning")
+      elseif(extra_license_filename STREQUAL "ThirdPartyNotices.txt")
+        set(license_name "Microsoft.Windows.AI.MachineLearning third-party notices")
+      endif()
     endif()
 
     file(READ "${license_file}" license_text)

@@ -16,6 +16,15 @@
 #define OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP 5
 #define OBS_BGREMOVAL_ORT_SESSION_SUCCESS 0
 
+void resetOrtSessionData(ORTModelData &data) noexcept;
+
+#ifdef _WIN32
+#include <filesystem>
+#include <string_view>
+int createWindowsMlOrtSession(filter_data *tf, const std::filesystem::path &modelPath);
+void logWindowsMlSessionOutcome(const windows_ml::SessionDiagnostics &diagnostics, std::string_view model);
+#endif
+
 int createOrtSession(filter_data *tf);
 
 bool runFilterModelInference(filter_data *tf, const cv::Mat &imageBGRA, cv::Mat &output);

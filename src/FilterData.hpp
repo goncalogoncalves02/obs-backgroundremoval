@@ -13,6 +13,9 @@
 
 #include "models/Model.hpp"
 #include "ort-utils/ORTModelData.hpp"
+#ifdef _WIN32
+#include "ort-utils/windows-ml-session-policy.hpp"
+#endif
 
 /**
   * @brief The filter_data struct
@@ -21,6 +24,9 @@
   *
 */
 struct filter_data : public ORTModelData, public std::enable_shared_from_this<filter_data> {
+#ifdef _WIN32
+	windows_ml::SessionDiagnostics sessionDiagnostics;
+#endif
 	std::string useGPU;
 	uint32_t numThreads;
 	std::string modelSelection;

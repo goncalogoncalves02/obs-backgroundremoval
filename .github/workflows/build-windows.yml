@@ -25,6 +25,12 @@ on:
       dll-artifact:
         description: DLL artifact for Windows.
         value: ${{ jobs.build.outputs.DLL_ARTIFACT_NAME }}
+      session-check-artifact:
+        description: Production Windows ML session-check artifact for x64 hardware testing.
+        value: ${{ jobs.build.outputs.SESSION_CHECK_ARTIFACT_NAME }}
+      smoke-tool-artifact:
+        description: Windows ML smoke-tool artifact for x64 hardware testing.
+        value: ${{ jobs.build.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
 
 env:
   # https://github.com/kaito-tokyo/vcpkg-obs-kaito-tokyo
@@ -37,11 +43,11 @@ jobs:
 
     outputs:
       DLL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
+      SMOKE_TOOL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+      SESSION_CHECK_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SESSION_CHECK_ARTIFACT_NAME }}
 
     env:
-      CCACHE_ORT_DIR: .ccache_ort
       VCPKG_FORCE_DOWNLOADED_BINARIES: '1'
-      VCPKG_ORT_TARGET_TRIPLET: x64-windows-static-md-obs-ort
       VCPKG_ROOT: ${{ github.workspace }}/vendor/vcpkg
       VCPKG_TARGET_TRIPLET: x64-windows-static-md-obs
 
@@ -70,10 +76,25 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: true
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify immutable source checkout
+        id: source
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actual = & git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read actual checkout HEAD.' }
+          $actual = ($actual -join "`n").Trim()
+          if ($actual -cne $env:SOURCE_COMMIT) { throw 'Checkout HEAD differs from immutable source receipt.' }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "SOURCE_COMMIT=$actual" -Encoding utf8
 
       - name: Checkout submodules
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        run: git submodule update --init --filter=blob:none vendor/obs-studio vendor/vcpkg vendor/onnxruntime
+        run: |
+          git submodule update --init --filter=blob:none vendor/obs-studio vendor/vcpkg
+          if ($LASTEXITCODE -ne 0) { throw 'Submodule checkout failed.' }
 
       - name: Load buildspec.props and VERSION
         id: buildspec
@@ -95,8 +116,14 @@ jobs:
           PLUGIN_VERSION: ${{ steps.buildspec.outputs.PLUGIN_VERSION }}
         run: |
           $DLL_ARTIFACT_NAME = "obs-backgroundremoval_$env:PLUGIN_VERSION.dll.zip"
+          $SMOKE_TOOL_ARTIFACT_NAME = "windows-ml-smoke_2.2.12_x64.zip"
+          $SESSION_CHECK_ARTIFACT_NAME = "windows-ml-session-check_2.2.12_x64.zip"
           "DLL_ARTIFACT_NAME=$DLL_ARTIFACT_NAME"
+          "SMOKE_TOOL_ARTIFACT_NAME=$SMOKE_TOOL_ARTIFACT_NAME"
+          "SESSION_CHECK_ARTIFACT_NAME=$SESSION_CHECK_ARTIFACT_NAME"
           Add-Content -Value "DLL_ARTIFACT_NAME=$DLL_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          Add-Content -Value "SMOKE_TOOL_ARTIFACT_NAME=$SMOKE_TOOL_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          Add-Content -Value "SESSION_CHECK_ARTIFACT_NAME=$SESSION_CHECK_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
 
       # BEGIN: Set up toolchains
 
@@ -109,6 +136,7 @@ jobs:
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
           & $BOOTSTRAP_VCPKG_BAT -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Set up buildspec dependencies (Windows)
         id: setup-buildspec-deps
@@ -119,6 +147,7 @@ jobs:
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
           cmake -P scripts/download-deps.cmake
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Set up Python
         id: setup-python
@@ -127,6 +156,145 @@ jobs:
           python-version: '3.9'
 
       # END: Set up toolchains
+
+      - name: Run Windows ML build contracts (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          & $env:PYTHON_COMMAND -m unittest tests/WindowsMlBuild/test_onnxruntime_backend.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+          & $env:PYTHON_COMMAND -m unittest tests/WindowsMlBuild/test_windows_ml_package.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+          & $env:PYTHON_COMMAND -m unittest tests/WindowsMlBuild/test_windows_ml_legal.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+          & $env:PYTHON_COMMAND -m unittest tests/WindowsMlSmoke/test_windows_ml_dependency.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+
+      - name: Configure Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          WINDOWS_ML_DIR: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}\build\cmake
+          CMAKE_SYSTEM_VERSION: ${{ steps.buildspec.outputs.windows_sdk_version }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke -G Ninja `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-Dmicrosoft.windows.ai.machinelearning_DIR=$env:WINDOWS_ML_DIR" `
+            "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+
+          cmake -S tools/windows-ml-smoke -B build_windows_ml_smoke_cli -G Ninja `
+            "-DCMAKE_BUILD_TYPE=Release" `
+            "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION" `
+            "-DWINDOWS_ML_SMOKE_CLI_TESTS_ONLY=ON"
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+
+      - name: Build Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          cmake --build build_windows_ml_smoke --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+          cmake --build build_windows_ml_smoke_cli --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+
+      - name: Test Windows ML smoke tool (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+
+          ctest --test-dir build_windows_ml_smoke_cli --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw 'Portable policy/CLI tests failed.' }
+          ctest --test-dir build_windows_ml_smoke --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw 'Native core/metadata/session harness tests failed.' }
+          $env:WINDOWS_ML_SMOKE_EXE = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke') 'windows-ml-smoke.exe'
+          $env:WINDOWS_ML_SMOKE_MODEL = Join-Path $env:GITHUB_WORKSPACE 'data\models\mediapipe.onnx'
+          & $env:PYTHON_COMMAND tests/WindowsMlSmoke/test_windows_ml_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+          & $env:WINDOWS_ML_SMOKE_EXE --provider cpu --model $env:WINDOWS_ML_SMOKE_MODEL
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+
+      - name: Test production session CLI and artifact fixtures (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          $env:WINDOWS_ML_SESSION_CHECK_EXE = Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke/windows-ml-session-check.exe'
+          $env:WINDOWS_ML_SESSION_CHECK_MODEL = Join-Path $env:GITHUB_WORKSPACE 'data/models/mediapipe.onnx'
+          & $env:PYTHON_COMMAND -m unittest discover -s tests/WindowsMlSession -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Production session CLI/artifact fixture checks failed.' }
+
+      - name: Package Windows ML smoke-tool artifact
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          SMOKE_TOOL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+        run: |
+          $SMOKE_BUILD_DIR = Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke'
+          $SMOKE_MODEL_PATH = Join-Path $env:GITHUB_WORKSPACE 'data\models\mediapipe.onnx'
+          $SMOKE_STAGE_DIR = Join-Path '${{ steps.job-temp.outputs.JOB_TEMP }}' 'windows-ml-smoke'
+          $SMOKE_ARCHIVE_PATH = Join-Path $env:GITHUB_WORKSPACE $env:SMOKE_TOOL_ARTIFACT_NAME
+          New-Item -Path $SMOKE_STAGE_DIR -ItemType Directory -Force
+          Copy-Item -LiteralPath (Join-Path $SMOKE_BUILD_DIR 'windows-ml-smoke.exe') -Destination $SMOKE_STAGE_DIR
+          Copy-Item -LiteralPath $SMOKE_MODEL_PATH -Destination $SMOKE_STAGE_DIR
+          $RUNTIME_DLLS = @(Get-ChildItem -LiteralPath $SMOKE_BUILD_DIR -Filter '*.dll' -File)
+          if ($RUNTIME_DLLS.Count -eq 0) {
+            throw 'The Windows ML smoke tool has no adjacent runtime DLLs to package.'
+          }
+          $RUNTIME_DLLS | Copy-Item -Destination $SMOKE_STAGE_DIR
+
+          $STAGED_FILES = @(Get-ChildItem -LiteralPath $SMOKE_STAGE_DIR -File)
+          $STAGED_EXECUTABLES = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.exe' })
+          $STAGED_MODELS = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.onnx' })
+          $STAGED_DLLS = @($STAGED_FILES | Where-Object { $_.Extension -ieq '.dll' })
+          if ($STAGED_EXECUTABLES.Count -ne 1 -or $STAGED_EXECUTABLES[0].Name -cne 'windows-ml-smoke.exe') {
+            throw "The Windows ML smoke staging directory must contain exactly one windows-ml-smoke.exe; found $($STAGED_EXECUTABLES.Count)."
+          }
+          if ($STAGED_MODELS.Count -ne 1 -or $STAGED_MODELS[0].Name -cne 'mediapipe.onnx') {
+            throw "The Windows ML smoke staging directory must contain exactly one mediapipe.onnx; found $($STAGED_MODELS.Count)."
+          }
+          if ($STAGED_DLLS.Count -eq 0) {
+            throw 'The Windows ML smoke staging directory must contain at least one adjacent runtime DLL.'
+          }
+
+          Compress-Archive -LiteralPath $STAGED_FILES.FullName -DestinationPath $SMOKE_ARCHIVE_PATH
+
+          $SMOKE_ARCHIVE = [System.IO.Compression.ZipFile]::OpenRead($SMOKE_ARCHIVE_PATH)
+          try {
+            $ZIP_FILE_ENTRIES = @($SMOKE_ARCHIVE.Entries | Where-Object { -not [string]::IsNullOrEmpty($_.Name) })
+            $ZIP_EXECUTABLE_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.exe' })
+            $ZIP_MODEL_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.onnx' })
+            $ZIP_DLL_ENTRIES = @($ZIP_FILE_ENTRIES | Where-Object { [System.IO.Path]::GetExtension($_.Name) -ieq '.dll' })
+            if ($ZIP_EXECUTABLE_ENTRIES.Count -ne 1 -or
+                $ZIP_EXECUTABLE_ENTRIES[0].FullName -cne 'windows-ml-smoke.exe') {
+              throw "The Windows ML smoke ZIP must contain exactly one root windows-ml-smoke.exe entry; found $($ZIP_EXECUTABLE_ENTRIES.Count)."
+            }
+            if ($ZIP_MODEL_ENTRIES.Count -ne 1 -or $ZIP_MODEL_ENTRIES[0].FullName -cne 'mediapipe.onnx') {
+              throw "The Windows ML smoke ZIP must contain exactly one root mediapipe.onnx entry; found $($ZIP_MODEL_ENTRIES.Count)."
+            }
+            if ($ZIP_DLL_ENTRIES.Count -eq 0) {
+              throw 'The Windows ML smoke ZIP must contain at least one runtime DLL entry.'
+            }
+            if (@($ZIP_DLL_ENTRIES | Where-Object { $_.FullName -cne $_.Name }).Count -ne 0) {
+              throw 'Every Windows ML smoke runtime DLL must be adjacent to the executable in the ZIP root.'
+            }
+          } finally {
+            $SMOKE_ARCHIVE.Dispose()
+          }
 
       - name: Configure OBS Studio (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
@@ -148,6 +316,7 @@ jobs:
             "-DENABLE_PLUGINS=OFF" `
             "-DOBS_CMAKE_VERSION=3.0.0" `
             "-DOBS_VERSION_OVERRIDE=$env:OBS_VERSION_OVERRIDE"
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Build OBS Studio (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
@@ -157,6 +326,7 @@ jobs:
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
           cmake --build build_obs --target obs-frontend-api --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Install OBS Studio (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
@@ -166,6 +336,7 @@ jobs:
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
           cmake --install build_obs --component Development --config Release --prefix obs_installed
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Install vcpkg dependencies (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
@@ -179,146 +350,13 @@ jobs:
           $env:VCPKG_DISABLE_METRICS = '1'
           $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
           & $VCPKG_COMMAND install --triplet $env:VCPKG_TARGET_TRIPLET
-
-      - name: Install vcpkg_ort dependencies (Windows)
-        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        run: |
-          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
-          $VCPKG_COMMAND = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
-
-          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
-          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-
-          $env:VCPKG_DISABLE_METRICS = '1'
-          $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
-          & $VCPKG_COMMAND install `
-            --triplet $env:VCPKG_ORT_TARGET_TRIPLET `
-            --overlay-triplets (Join-Path $env:GITHUB_WORKSPACE 'vcpkg-triplets') `
-            --x-install-root (Join-Path $env:GITHUB_WORKSPACE 'vcpkg_ort_installed') `
-            --x-manifest-root (Join-Path $env:GITHUB_WORKSPACE 'vendor' 'onnxruntime' 'cmake')
-
-      - name: Restore ccache_ort (Windows)
-        id: ccache-ort
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.CCACHE_ORT_DIR }}
-          key: ccache_ort-v2-${{ runner.os }}-x64-${{ steps.windows-build.outputs.WINDOWS_BUILD_VERSION }}-${{ steps.setup-buildspec-deps.outputs.CCACHE_VERSION }}-${{ steps.buildspec.outputs.windows_sdk_version }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            ccache_ort-v2-${{ runner.os }}-x64-${{ steps.windows-build.outputs.WINDOWS_BUILD_VERSION }}-${{ steps.setup-buildspec-deps.outputs.CCACHE_VERSION }}-${{ steps.buildspec.outputs.windows_sdk_version }}-${{ github.run_id }}-
-            ccache_ort-v2-${{ runner.os }}-x64-${{ steps.windows-build.outputs.WINDOWS_BUILD_VERSION }}-${{ steps.setup-buildspec-deps.outputs.CCACHE_VERSION }}-${{ steps.buildspec.outputs.windows_sdk_version }}-
-
-      - name: Reset ccache_ort stats
-        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        env:
-          CCACHE_COMMAND: ${{ steps.setup-buildspec-deps.outputs.CCACHE_COMMAND }}
-        run: |
-          & $env:CCACHE_COMMAND --zero-stats
-
-      - name: Generate reduced operators for ONNX Runtime
-        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        env:
-          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
-          REDUCED_OPS_CONFIG_PATH: ${{ steps.buildspec.outputs.onnxruntime_reduced_ops_config }}
-        run: |
-          & $env:PYTHON_COMMAND -m pip install -r requirements-build.txt
-          & $env:PYTHON_COMMAND vendor/onnxruntime/tools/ci_build/reduce_op_kernels.py `
-            $env:REDUCED_OPS_CONFIG_PATH `
-            --cmake_build_dir build_ort `
-            --is_extended_minimal_build_or_higher
-
-      - name: Configure ONNX Runtime (Windows)
-        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        env:
-          CCACHE_COMMAND: ${{ steps.setup-buildspec-deps.outputs.CCACHE_COMMAND }}
-          CMAKE_SYSTEM_VERSION: ${{ steps.buildspec.outputs.windows_sdk_version }}
-          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
-        run: |
-          $CMAKE_TOOLCHAIN_FILE = Join-Path $env:VCPKG_ROOT 'scripts' 'buildsystems' 'vcpkg.cmake'
-          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
-          $VCPKG_COMMAND = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
-
-          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
-          $env:VCPKG_DISABLE_METRICS = '1'
-          $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
-          $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
-          $NINJA_BINDIR = & $VCPKG_COMMAND fetch ninja | Select-Object -Last 1 | Split-Path -Parent
-
-          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          $env:Path = "$CMAKE_BINDIR;$NINJA_BINDIR;$env:Path"
-
-          $env:CCACHE_BASEDIR = $env:GITHUB_WORKSPACE
-          $env:CCACHE_DIR = Join-Path $env:GITHUB_WORKSPACE $env:CCACHE_ORT_DIR
-          $env:CCACHE_SLOPPINESS = 'include_file_mtime,time_macros'
-          cmake -S vendor/onnxruntime/cmake -B build_ort -G Ninja --compile-no-warning-as-error `
-            "-DCMAKE_BUILD_TYPE=Release" `
-            "-DCMAKE_C_COMPILER_LAUNCHER=$env:CCACHE_COMMAND" `
-            "-DCMAKE_CXX_COMPILER_LAUNCHER=$env:CCACHE_COMMAND" `
-            "-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON" `
-            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" `
-            "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION" `
-            "-DCMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_FILE" `
-            "-DPython_EXECUTABLE=$env:PYTHON_COMMAND" `
-            "-DVCPKG_INSTALLED_DIR=$(Join-Path $env:GITHUB_WORKSPACE 'vcpkg_ort_installed')" `
-            "-DVCPKG_MANIFEST_INSTALL=OFF" `
-            "-DVCPKG_OVERLAY_TRIPLETS=$(Join-Path $env:GITHUB_WORKSPACE 'vcpkg-triplets')" `
-            "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_ORT_TARGET_TRIPLET" `
-            "-Donnxruntime_BUILD_SHARED_LIB=OFF" `
-            "-Donnxruntime_BUILD_UNIT_TESTS=OFF" `
-            "-Donnxruntime_DISABLE_RTTI=OFF" `
-            "-Donnxruntime_REDUCED_OPS_BUILD=ON" `
-            "-Donnxruntime_RUN_ONNX_TESTS=OFF" `
-            "-Donnxruntime_USE_VCPKG=ON"
-
-      - name: Build ONNX Runtime (Windows)
-        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        run: |
-          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
-          $VCPKG_COMMAND = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
-
-          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
-          $env:VCPKG_DISABLE_METRICS = '1'
-          $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
-          $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
-          $NINJA_BINDIR = & $VCPKG_COMMAND fetch ninja | Select-Object -Last 1 | Split-Path -Parent
-
-          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          $env:Path = "$CMAKE_BINDIR;$NINJA_BINDIR;$env:Path"
-
-          $env:CCACHE_BASEDIR = $env:GITHUB_WORKSPACE
-          $env:CCACHE_DIR = Join-Path $env:GITHUB_WORKSPACE $env:CCACHE_ORT_DIR
-          $env:CCACHE_SLOPPINESS = 'include_file_mtime,time_macros'
-          cmake --build build_ort --config Release --parallel
-
-      - name: Install ONNX Runtime (Windows)
-        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        run: |
-          $VCPKG_COMMAND = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
-          $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
-          $env:VCPKG_DISABLE_METRICS = '1'
-          $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
-          $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
-          $env:Path = "$CMAKE_BINDIR;$env:Path"
-
-          cmake --install build_ort --config Release --prefix ort_installed
-
-      - name: Save ccache_ort
-        if: success() && steps.ccache-ort.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.CCACHE_ORT_DIR }}
-          key: ${{ steps.ccache-ort.outputs.cache-primary-key }}
-
-      - name: Show ccache_ort stats
-        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
-        env:
-          CCACHE_COMMAND: ${{ steps.setup-buildspec-deps.outputs.CCACHE_COMMAND }}
-        run: |
-          & $env:CCACHE_COMMAND --show-stats | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Configure (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
-          CMAKE_PREFIX_PATH: ${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_PREFIX }};${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_QT6_PREFIX }};${{ github.workspace }}\obs_installed;${{ github.workspace }}\vcpkg_ort_installed\${{ env.VCPKG_ORT_TARGET_TRIPLET }};${{ github.workspace }}\ort_installed;${{ github.workspace }}\vcpkg_installed\${{ env.VCPKG_TARGET_TRIPLET }}
+          WINDOWS_ML_DIR: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}\build\cmake
+          CMAKE_PREFIX_PATH: ${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_PREFIX }};${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_QT6_PREFIX }};${{ github.workspace }}\obs_installed;${{ github.workspace }}\vcpkg_installed\${{ env.VCPKG_TARGET_TRIPLET }}
           CMAKE_SYSTEM_VERSION: ${{ steps.buildspec.outputs.windows_sdk_version }}
         run: |
           $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
@@ -328,7 +366,9 @@ jobs:
           $env:VCPKG_DISABLE_METRICS = '1'
           $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
           $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
           $NINJA_BINDIR = & $VCPKG_COMMAND fetch ninja | Select-Object -Last 1 | Split-Path -Parent
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing Ninja toolchain.' }
 
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:Path = "$CMAKE_BINDIR;$NINJA_BINDIR;$env:Path"
@@ -336,7 +376,10 @@ jobs:
           cmake -S . -B build -G Ninja `
             "-DCMAKE_BUILD_TYPE=RelWithDebInfo" `
             "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH" `
+            "-DWINDOWS_ML_PACKAGE_CONFIG_DIR=$env:WINDOWS_ML_DIR" `
+            "-Dmicrosoft.windows.ai.machinelearning_DIR=$env:WINDOWS_ML_DIR" `
             "-DCMAKE_SYSTEM_VERSION=$env:CMAKE_SYSTEM_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Build (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
@@ -348,29 +391,121 @@ jobs:
           $env:VCPKG_DISABLE_METRICS = '1'
           $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
           $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
           $NINJA_BINDIR = & $VCPKG_COMMAND fetch ninja | Select-Object -Last 1 | Split-Path -Parent
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing Ninja toolchain.' }
 
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:Path = "$CMAKE_BINDIR;$NINJA_BINDIR;$env:Path"
 
           cmake --build build --config RelWithDebInfo --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+
+      - name: Test production plugin session adapter (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          OBS_DEPS_PREFIX: ${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_PREFIX }}
+          WINDOWS_ML_PREFIX: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $VCPKG_COMMAND = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
+          $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
+          $env:Path = "$CMAKE_BINDIR;$env:Path"
+          $ADAPTER_DIRECTORY = Join-Path $env:GITHUB_WORKSPACE 'build\tests\WindowsMlSession'
+          $ADAPTER_EXE = Join-Path $ADAPTER_DIRECTORY 'windows-ml-plugin-session.exe'
+          ./tests/WindowsMlSession/stage-obs-runtime.ps1 `
+            -ObsDepsPrefix $env:OBS_DEPS_PREFIX `
+            -AdapterDirectory $ADAPTER_DIRECTORY `
+            -WindowsMlRoot $env:WINDOWS_ML_PREFIX
+          Write-Output 'Staged native adapter DLLs:'
+          Get-ChildItem -LiteralPath $ADAPTER_DIRECTORY -Filter '*.dll' -File | Select-Object -ExpandProperty Name
+          dumpbin /dependents $ADAPTER_EXE
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect native adapter dependencies.' }
+          $OBS_DLL = Join-Path $ADAPTER_DIRECTORY 'obs.dll'
+          if (Test-Path -LiteralPath $OBS_DLL -PathType Leaf) {
+            dumpbin /dependents $OBS_DLL
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect adjacent OBS dependencies.' }
+          }
+          ctest --test-dir build -C RelWithDebInfo -R '^windows-ml-plugin-session$' --output-on-failure --no-tests=error --verbose --interactive-debug-mode 0
+          if ($LASTEXITCODE -ne 0) { throw 'Production plugin session adapter tests failed.' }
 
       - name: Package dll artifact (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
           DLL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+          WINDOWS_ML_PREFIX: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}
         run: |
           $VCPKG_COMMAND = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
           $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
           $env:VCPKG_DISABLE_METRICS = '1'
           $env:VCPKG_FORCE_DOWNLOADED_BINARIES = '1'
           $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
           $env:Path = "$CMAKE_BINDIR;$env:Path"
 
           cmake --install build --config RelWithDebInfo --prefix build_prefix
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
           Set-Location build_prefix
           Compress-Archive -Path '*' -DestinationPath (Join-Path $env:GITHUB_WORKSPACE $env:DLL_ARTIFACT_NAME)
+
+          Set-Location $env:GITHUB_WORKSPACE
+          & $env:PYTHON_COMMAND scripts/verify_windows_ml_package.py `
+            --install-root (Join-Path $env:GITHUB_WORKSPACE 'build_prefix') `
+            --archive (Join-Path $env:GITHUB_WORKSPACE $env:DLL_ARTIFACT_NAME) `
+            --windows-ml-root $env:WINDOWS_ML_PREFIX
+          if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
+
+      - name: Package production session-check artifact and record receipts
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          WINDOWS_ML_PREFIX: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.SOURCE_COMMIT }}
+          SESSION_CHECK_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SESSION_CHECK_ARTIFACT_NAME }}
+          DLL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
+        run: |
+          & ./scripts/package_windows_ml_session_check.ps1 `
+            -BuildDirectory (Join-Path $env:GITHUB_WORKSPACE 'build_windows_ml_smoke') `
+            -ModelPath (Join-Path $env:GITHUB_WORKSPACE 'data/models/mediapipe.onnx') `
+            -WindowsMlRoot $env:WINDOWS_ML_PREFIX `
+            -SourceCommit $env:SOURCE_COMMIT `
+            -DestinationZip (Join-Path $env:GITHUB_WORKSPACE $env:SESSION_CHECK_ARTIFACT_NAME)
+          "source_commit=$env:SOURCE_COMMIT" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          foreach ($name in @($env:DLL_ARTIFACT_NAME, $env:SESSION_CHECK_ARTIFACT_NAME)) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$name sha256=$hash" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Attest Windows ML smoke-tool artifact
+        if: inputs.upload-artifacts && inputs.attest-artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+
+      - name: Upload Windows ML smoke-tool artifact
+        if: inputs.upload-artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+          archive: false
+          if-no-files-found: error
+
+      - name: Attest production session-check artifact
+        if: inputs.upload-artifacts && inputs.attest-artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.expected-artifacts.outputs.SESSION_CHECK_ARTIFACT_NAME }}
+
+      - name: Upload production session-check artifact
+        if: inputs.upload-artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ steps.expected-artifacts.outputs.SESSION_CHECK_ARTIFACT_NAME }}
+          archive: false
+          if-no-files-found: error
 
       - name: Attest DLL artifact
         if: inputs.upload-artifacts && inputs.attest-artifacts

@@ -48,6 +48,9 @@
 #include "ort-utils/ort-session-utils.hpp"
 #include "obs-utils/obs-utils.hpp"
 #include "consts.h"
+#ifdef _WIN32
+#include "obs-utils/windows-ml-status.hpp"
+#endif
 
 struct background_removal_filter : public filter_data, public std::enable_shared_from_this<background_removal_filter> {
 	bool enableThreshold = true;
@@ -129,6 +132,10 @@ static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p, 
 		p = obs_properties_get(ppts, prop_name);
 		obs_property_set_visible(p, enabled);
 	}
+#ifdef _WIN32
+	// Keep the device switch accessible without enabling advanced settings.
+	obs_property_set_visible(obs_properties_get(ppts, "useGPU"), true);
+#endif
 
 	if (enabled) {
 		enable_threshold_modified(ppts, p, settings);
@@ -181,6 +188,17 @@ obs_properties_t *background_filter_properties(void *data)
 							    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
 	obs_property_list_add_string(p_use_gpu, obs_module_text("CPU"), USEGPU_CPU);
+#ifdef _WIN32
+	obs_property_list_add_string(p_use_gpu, obs_module_text("GPUDirectML"), USEGPU_WINML_DIRECTML);
+	obs_property_set_long_description(p_use_gpu, obs_module_text("DirectMLMediaPipeOnly"));
+	std::string_view statusKey = "InferenceStatusPending";
+	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
+	if (ptr && *ptr) {
+		std::unique_lock<std::mutex> lock((*ptr)->modelMutex);
+		statusKey = windows_ml::session_status_text_key((*ptr)->sessionDiagnostics);
+	}
+	obs_properties_add_text(props, "inference_status", obs_module_text(statusKey.data()), OBS_TEXT_INFO);
+#endif
 #ifdef HAVE_ONNXRUNTIME_CUDA_EP
 	obs_property_list_add_string(p_use_gpu, obs_module_text("GPUCUDA"), USEGPU_CUDA);
 #endif
@@ -324,48 +342,67 @@ void background_filter_update(void *data, obs_data_t *settings)
 	const std::string newUseGpu = obs_data_get_string(settings, "useGPU");
 	const std::string newModel = obs_data_get_string(settings, "model_select");
 	const uint32_t newNumThreads = (uint32_t)obs_data_get_int(settings, "numThreads");
+#ifdef _WIN32
+	bool sessionChanged = false;
+#endif
 
-	if (tf->modelSelection.empty() || tf->modelSelection != newModel || tf->useGPU != newUseGpu ||
-	    tf->numThreads != newNumThreads) {
-		// lock modelMutex
+	{
+		// Serialize settings comparisons, replacement and inference with the subclass mutex.
 		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		if (!tf->session || tf->modelSelection.empty() || tf->modelSelection != newModel ||
+		    tf->useGPU != newUseGpu || tf->numThreads != newNumThreads) {
 
-		// Re-initialize model if it's not already the selected one or switching inference device
-		tf->modelSelection = newModel;
-		tf->useGPU = newUseGpu;
-		tf->numThreads = newNumThreads;
+			// Re-initialize model if it's not already the selected one or switching inference device
+			tf->modelSelection = newModel;
+			tf->useGPU = newUseGpu;
+			tf->numThreads = newNumThreads;
 
-		if (tf->modelSelection == MODEL_SINET) {
-			tf->model.reset(new ModelSINET);
-		}
-		if (tf->modelSelection == MODEL_SELFIE) {
-			tf->model.reset(new ModelSelfie);
-		}
-		if (tf->modelSelection == MODEL_SELFIE_MULTICLASS) {
-			tf->model.reset(new ModelSelfieMulticlass);
-		}
-		if (tf->modelSelection == MODEL_MEDIAPIPE) {
-			tf->model.reset(new ModelMediaPipe);
-		}
-		if (tf->modelSelection == MODEL_RVM) {
-			tf->model.reset(new ModelRVM);
-		}
-		if (tf->modelSelection == MODEL_PPHUMANSEG) {
-			tf->model.reset(new ModelPPHumanSeg);
-		}
-		if (tf->modelSelection == MODEL_DEPTH_TCMONODEPTH) {
-			tf->model.reset(new ModelTCMonoDepth);
-		}
+			if (tf->modelSelection == MODEL_SINET) {
+				tf->model.reset(new ModelSINET);
+			}
+			if (tf->modelSelection == MODEL_SELFIE) {
+				tf->model.reset(new ModelSelfie);
+			}
+			if (tf->modelSelection == MODEL_SELFIE_MULTICLASS) {
+				tf->model.reset(new ModelSelfieMulticlass);
+			}
+			if (tf->modelSelection == MODEL_MEDIAPIPE) {
+				tf->model.reset(new ModelMediaPipe);
+			}
+			if (tf->modelSelection == MODEL_RVM) {
+				tf->model.reset(new ModelRVM);
+			}
+			if (tf->modelSelection == MODEL_PPHUMANSEG) {
+				tf->model.reset(new ModelPPHumanSeg);
+			}
+			if (tf->modelSelection == MODEL_DEPTH_TCMONODEPTH) {
+				tf->model.reset(new ModelTCMonoDepth);
+			}
 
-		int ortSessionResult = createOrtSession(tf.get());
-		if (ortSessionResult != OBS_BGREMOVAL_ORT_SESSION_SUCCESS) {
-			obs_log(LOG_ERROR, "Failed to create ONNXRuntime session. Error code: %d", ortSessionResult);
-			// disable filter
-			tf->isDisabled = true;
-			tf->model.reset();
-			return;
+			int ortSessionResult = createOrtSession(tf.get());
+#ifdef _WIN32
+			sessionChanged = true;
+#endif
+			if (ortSessionResult != OBS_BGREMOVAL_ORT_SESSION_SUCCESS) {
+				obs_log(LOG_ERROR, "Failed to create ONNXRuntime session. Error code: %d",
+					ortSessionResult);
+				// disable filter
+				tf->isDisabled = true;
+				resetOrtSessionData(*tf);
+				tf->model.reset();
+				lock.unlock();
+#ifdef _WIN32
+				obs_source_update_properties(tf->source);
+#endif
+				return;
+			}
 		}
 	}
+#ifdef _WIN32
+	if (sessionChanged) {
+		obs_source_update_properties(tf->source);
+	}
+#endif
 
 	obs_enter_graphics();
 
@@ -408,8 +445,11 @@ void background_filter_update(void *data, obs_data_t *settings)
 	obs_log(LOG_INFO, "  Model file path: %s", tf->modelFilepath.c_str());
 #endif
 
-	// enable
-	tf->isDisabled = false;
+	// Enable only a completely initialized session.
+	{
+		std::unique_lock<std::mutex> lock(tf->modelMutex);
+		tf->isDisabled = !tf->session || !tf->model;
+	}
 }
 
 void background_filter_activate(void *data)
@@ -421,8 +461,9 @@ void background_filter_activate(void *data)
 
 	std::shared_ptr<background_removal_filter> tf = *ptr;
 	if (tf && tf->stopWhenSourceIsInactive) {
+		std::unique_lock<std::mutex> lock(tf->modelMutex);
 		obs_log(LOG_INFO, "Background filter activated");
-		tf->isDisabled = false;
+		tf->isDisabled = !tf->session || !tf->model;
 	}
 }
 
@@ -539,11 +580,6 @@ void background_filter_video_tick(void *data, float seconds)
 		return;
 	}
 
-	if (!tf->model) {
-		obs_log(LOG_ERROR, "Model is not initialized");
-		return;
-	}
-
 	cv::Mat imageBGRA;
 	{
 		std::unique_lock<std::mutex> lock(tf->inputBGRALock, std::try_to_lock);
@@ -589,6 +625,10 @@ void background_filter_video_tick(void *data, float seconds)
 
 			{
 				std::unique_lock<std::mutex> lock(tf->modelMutex);
+				// Recheck after waiting for initialization, which may have failed.
+				if (tf->isDisabled || !tf->session || !tf->model) {
+					return;
+				}
 				// Process the image to find the mask.
 				processImageForBackground(tf.get(), imageBGRA, backgroundMask);
 			}
