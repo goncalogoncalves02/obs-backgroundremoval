@@ -403,6 +403,9 @@ jobs:
 
       - name: Test production plugin session adapter (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          OBS_DEPS_PREFIX: ${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_PREFIX }}
+          WINDOWS_ML_PREFIX: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}
         run: |
           $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
@@ -412,6 +415,10 @@ jobs:
           $env:Path = "$CMAKE_BINDIR;$env:Path"
           $ADAPTER_DIRECTORY = Join-Path $env:GITHUB_WORKSPACE 'build\tests\WindowsMlSession'
           $ADAPTER_EXE = Join-Path $ADAPTER_DIRECTORY 'windows-ml-plugin-session.exe'
+          ./tests/WindowsMlSession/stage-obs-runtime.ps1 `
+            -ObsDepsPrefix $env:OBS_DEPS_PREFIX `
+            -AdapterDirectory $ADAPTER_DIRECTORY `
+            -WindowsMlRoot $env:WINDOWS_ML_PREFIX
           Write-Output 'Staged native adapter DLLs:'
           Get-ChildItem -LiteralPath $ADAPTER_DIRECTORY -Filter '*.dll' -File | Select-Object -ExpandProperty Name
           dumpbin /dependents $ADAPTER_EXE
