@@ -67,7 +67,23 @@ find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
 
 enable_testing()
 
-add_executable(windows-ml-smoke main.cpp inference-runner.cpp ../../src/ort-utils/windows-ml-provider.cpp)
+add_windows_ml_session_core()
+add_executable(windows-ml-session-core-test tests/session-core-test.cpp)
+target_link_libraries(windows-ml-session-core-test PRIVATE windows-ml-session-core)
+add_custom_command(
+  TARGET windows-ml-session-core-test
+  POST_BUILD
+  COMMAND
+    "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:windows-ml-session-core-test>
+    $<TARGET_FILE_DIR:windows-ml-session-core-test>
+  COMMAND_EXPAND_LISTS
+)
+add_test(
+  NAME windows-ml-session-core
+  COMMAND windows-ml-session-core-test "${CMAKE_CURRENT_SOURCE_DIR}/../../data/models/mediapipe.onnx"
+)
+
+add_executable(windows-ml-smoke main.cpp inference-runner.cpp)
 target_compile_features(windows-ml-smoke PRIVATE cxx_std_20)
 target_compile_definitions(windows-ml-smoke PRIVATE WINDOWS_ML_PACKAGE_VERSION="2.2.12")
 target_include_directories(windows-ml-smoke PRIVATE ../../src/ort-utils)
@@ -79,8 +95,7 @@ target_link_libraries(
     windows-ml-smoke-benchmark-report
     windows-ml-smoke-provider-policy
     windows-ml-smoke-provider-report
-    WindowsML::Api
-    WindowsML::OnnxRuntime
+    windows-ml-session-core
 )
 
 add_custom_command(
@@ -91,17 +106,12 @@ add_custom_command(
   COMMAND_EXPAND_LISTS
 )
 
-add_executable(
-  windows-ml-smoke-inference-metadata-test
-  tests/inference-metadata-test.cpp
-  inference-runner.cpp
-  ../../src/ort-utils/windows-ml-provider.cpp
-)
+add_executable(windows-ml-smoke-inference-metadata-test tests/inference-metadata-test.cpp inference-runner.cpp)
 target_compile_features(windows-ml-smoke-inference-metadata-test PRIVATE cxx_std_20)
 target_include_directories(windows-ml-smoke-inference-metadata-test PRIVATE ../../src/ort-utils)
 target_link_libraries(
   windows-ml-smoke-inference-metadata-test
-  PRIVATE windows-ml-smoke-benchmark windows-ml-smoke-provider-policy WindowsML::Api WindowsML::OnnxRuntime
+  PRIVATE windows-ml-smoke-benchmark windows-ml-session-core
 )
 
 add_custom_command(

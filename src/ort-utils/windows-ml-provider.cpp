@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <Windows.h>
 
 #include <WinMLEpCatalog.h>
@@ -99,6 +103,41 @@ private:
 		return ProviderReadyState::Unknown;
 	}
 }
+
+// The shared readiness gate invokes this adapter only for an installed NotReady EP.
+class InstalledActivation final : public InstalledProviderActivation {
+public:
+	InstalledActivation(WinMLEpHandle provider, ProviderSessionResult &result) noexcept
+		: provider_(provider),
+		  result_(result)
+	{
+	}
+
+	void activate() override
+	{
+		result_.process_activation_attempted = true;
+		const HRESULT activation_result = WinMLEpEnsureReady(provider_);
+		if (FAILED(activation_result)) {
+			throw CatalogHresultFailure(activation_result,
+						    "failed to activate the installed provider in this process");
+		}
+	}
+
+	ProviderReadyState read_state() override
+	{
+		WinMLEpReadyState state{};
+		const HRESULT state_result = WinMLEpGetReadyState(provider_, &state);
+		if (FAILED(state_result)) {
+			throw CatalogHresultFailure(state_result, "failed to re-read the provider ready state");
+		}
+		result_.ready_state_after = ready_state_name(state);
+		return provider_ready_state(state);
+	}
+
+private:
+	WinMLEpHandle provider_;
+	ProviderSessionResult &result_;
+};
 
 [[nodiscard]] std::string certification_name(WinMLEpCertification certification)
 {
@@ -265,6 +304,7 @@ struct DeviceCandidate {
 [[nodiscard]] bool attach_existing_amd_gpu_device(Ort::Env &environment, Ort::SessionOptions &session_options,
 						  std::string_view exact_provider_name, ProviderSessionResult &result)
 {
+	result.failure_stage = ProviderFailureStage::DeviceSelection;
 	std::vector<DeviceCandidate> candidates;
 	for (const auto &device : environment.GetEpDevices()) {
 		auto info = copy_device(device);
@@ -284,11 +324,13 @@ struct DeviceCandidate {
 		});
 	std::vector<Ort::ConstEpDevice> selected_devices{selected->device};
 	Ort::KeyValuePairs empty_options;
-	session_options.AppendExecutionProvider_V2(environment, selected_devices, empty_options);
-
 	result.discovered_provider_name = selected->info.ep_name;
 	result.selected_device = selected->info;
+	result.failure_stage = ProviderFailureStage::Attachment;
+	session_options.AppendExecutionProvider_V2(environment, selected_devices, empty_options);
+
 	result.succeeded = true;
+	result.failure_stage = ProviderFailureStage::None;
 	return true;
 }
 
@@ -436,12 +478,14 @@ ProviderSessionResult configure_provider_session(Ort::Env &environment, Ort::Ses
 						 std::string_view exact_provider_name) noexcept
 {
 	ProviderSessionResult result;
+	result.failure_stage = ProviderFailureStage::Discovery;
 	try {
 		result.requested_provider_name = exact_provider_name;
 		if (attach_existing_amd_gpu_device(environment, session_options, exact_provider_name, result)) {
 			return result;
 		}
 
+		result.failure_stage = ProviderFailureStage::Discovery;
 		WinMLEpCatalogHandle raw_catalog = nullptr;
 		const HRESULT create_result = WinMLEpCatalogCreate(&raw_catalog);
 		if (FAILED(create_result)) {
@@ -478,35 +522,21 @@ ProviderSessionResult configure_provider_session(Ort::Env &environment, Ort::Ses
 		result.ready_state_before = ready_state_name(ready_state);
 		result.ready_state_after = result.ready_state_before;
 
-		switch (activation_action(provider_ready_state(ready_state))) {
-		case ProviderActivationAction::UnavailableWithoutActivation:
-			result.error = "provider is unavailable without activation: " + result.ready_state_before;
+		const auto initial_state = provider_ready_state(ready_state);
+		if (initial_state == ProviderReadyState::NotReady) {
+			result.failure_stage = ProviderFailureStage::Activation;
+		}
+		InstalledActivation activation(provider, result);
+		const auto final_state = ensure_installed_provider_ready(initial_state, activation);
+		if (final_state != ProviderReadyState::Ready) {
+			result.error =
+				initial_state == ProviderReadyState::NotReady
+					? "provider is not ready after process-local activation"
+					: "provider is unavailable without activation: " + result.ready_state_before;
 			return result;
-		case ProviderActivationAction::ActivateInstalledThenRegister: {
-			result.process_activation_attempted = true;
-			const HRESULT ensure_result = WinMLEpEnsureReady(provider);
-			if (FAILED(ensure_result)) {
-				set_hresult_error(result, ensure_result,
-						  "failed to activate the installed provider in this process");
-				return result;
-			}
-
-			state_result = WinMLEpGetReadyState(provider, &ready_state);
-			if (FAILED(state_result)) {
-				set_hresult_error(result, state_result, "failed to re-read the provider ready state");
-				return result;
-			}
-			result.ready_state_after = ready_state_name(ready_state);
-			if (provider_ready_state(ready_state) != ProviderReadyState::Ready) {
-				result.error = "provider is not ready after process-local activation";
-				return result;
-			}
-			break;
-		}
-		case ProviderActivationAction::RegisterReady:
-			break;
 		}
 
+		result.failure_stage = ProviderFailureStage::Registration;
 		const auto library_path = provider_library_path(provider);
 		if (library_path.empty()) {
 			result.error = "ready provider has an empty library path";

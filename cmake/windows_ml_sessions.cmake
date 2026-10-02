@@ -20,3 +20,24 @@ function(add_windows_ml_policy_targets)
     add_library(windows-ml-smoke-provider-policy ALIAS windows-ml-provider-policy)
   endif()
 endfunction()
+
+function(add_windows_ml_session_core)
+  if(TARGET windows-ml-session-core)
+    return()
+  endif()
+
+  add_windows_ml_policy_targets()
+  set(_windows_ml_core_dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/ort-utils")
+  add_library(
+    windows-ml-session-core
+    STATIC
+    "${_windows_ml_core_dir}/windows-ml-session.cpp"
+    "${_windows_ml_core_dir}/windows-ml-provider.cpp"
+  )
+  target_compile_features(windows-ml-session-core PUBLIC cxx_std_20)
+  target_include_directories(windows-ml-session-core PUBLIC "${_windows_ml_core_dir}")
+  target_link_libraries(
+    windows-ml-session-core
+    PUBLIC windows-ml-provider-policy windows-ml-session-policy WindowsML::Api WindowsML::OnnxRuntime
+  )
+endfunction()

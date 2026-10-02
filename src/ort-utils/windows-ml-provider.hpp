@@ -58,6 +58,15 @@ struct ProviderPreparationResult {
 	std::string error;
 };
 
+enum class ProviderFailureStage {
+	None,
+	Discovery,
+	Activation,
+	Registration,
+	DeviceSelection,
+	Attachment,
+};
+
 struct ProviderSessionResult {
 	std::string requested_provider_name;
 	std::string discovered_provider_name;
@@ -67,6 +76,7 @@ struct ProviderSessionResult {
 	bool provider_registration_succeeded{};
 	std::optional<EpDeviceInfo> selected_device;
 	bool succeeded{};
+	ProviderFailureStage failure_stage{ProviderFailureStage::None};
 	std::optional<std::uint32_t> error_hresult;
 	std::string error;
 };
