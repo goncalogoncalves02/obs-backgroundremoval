@@ -410,7 +410,7 @@ jobs:
           $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
           $env:Path = "$CMAKE_BINDIR;$env:Path"
-          ctest --test-dir build -C RelWithDebInfo -R '^windows-ml-plugin-session$' --output-on-failure --no-tests=error
+          ctest --test-dir build -C RelWithDebInfo -R '^windows-ml-plugin-session$' --output-on-failure --no-tests=error --verbose --interactive-debug-mode 0
           if ($LASTEXITCODE -ne 0) { throw 'Production plugin session adapter tests failed.' }
 
       - name: Package dll artifact (Windows)

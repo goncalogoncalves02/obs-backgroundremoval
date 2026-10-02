@@ -17,3 +17,4 @@ add_test(
   NAME windows-ml-plugin-session
   COMMAND windows-ml-plugin-session "${PROJECT_SOURCE_DIR}/data/models/mediapipe.onnx"
 )
+set_tests_properties(windows-ml-plugin-session PROPERTIES TIMEOUT 300)
