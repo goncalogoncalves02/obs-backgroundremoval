@@ -812,7 +812,7 @@ endif()
             str(fixture_directory),
             "-B",
             str(self.fixture_root / "build"),
-            f"-DBACKEND_MODULE_DIR={REPOSITORY_ROOT / 'cmake'}",
+            f"-DBACKEND_MODULE_DIR={(REPOSITORY_ROOT / 'cmake').as_posix()}",
             f"-DEXPECTED_WINDOWS_ML_VERSION={expected_windows_ml_version}",
             f"-DRESULT_FILE={output}",
         ]
