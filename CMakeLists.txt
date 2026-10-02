@@ -360,6 +360,7 @@ set(
   data/locale/ja-JP.ini
   data/locale/ko-KR.ini
   data/locale/pt-BR.ini
+  data/locale/pt-PT.ini
   data/locale/ru-RU.ini
   data/locale/ta-IN.ini
   data/locale/tr-TR.ini

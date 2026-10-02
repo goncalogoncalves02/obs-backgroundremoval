@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "windows-ml-session-policy.hpp"
+#include "../../../src/obs-utils/windows-ml-status.hpp"
 
 #include <iostream>
 #include <string_view>
@@ -109,6 +110,32 @@ void invalid_thread_count_rejected()
 	       "zero CPU threads preserves ORT default behavior and GPU selection");
 }
 
+void displayed_device_uses_completed_session()
+{
+	windows_ml::SessionDiagnostics diagnostic;
+	diagnostic.requested_provider = "winml-directml";
+	diagnostic.effective_provider = "DmlExecutionProvider";
+	expect(windows_ml::session_status_text_key(diagnostic) == "InferenceStatusPending",
+	       "uninitialized session cannot display GPU even with stale effective provider");
+	diagnostic.outcome = windows_ml::SessionOutcome::Failed;
+	expect(windows_ml::session_status_text_key(diagnostic) == "InferenceStatusFailed",
+	       "failed session cannot display its stale GPU provider");
+	diagnostic.outcome = windows_ml::SessionOutcome::Ready;
+	expect(windows_ml::session_status_text_key(diagnostic) == "InferenceStatusDirectML",
+	       "completed DirectML session displays GPU");
+	diagnostic.effective_provider = "CPUExecutionProvider";
+	diagnostic.fallback_reason = "provider_not_ready";
+	expect(windows_ml::session_status_text_key(diagnostic) == "InferenceStatusCpuFallback",
+	       "DirectML request with CPU session displays CPU fallback");
+	diagnostic.fallback_reason = "unsupported_model";
+	expect(windows_ml::session_status_text_key(diagnostic) == "InferenceStatusCpuModel",
+	       "unsupported model explains why CPU is active");
+	diagnostic.requested_provider = "cpu";
+	diagnostic.fallback_reason.clear();
+	expect(windows_ml::session_status_text_key(diagnostic) == "InferenceStatusCPU",
+	       "switching back to completed CPU session removes stale fallback warning");
+}
+
 } // namespace
 
 int main()
@@ -118,6 +145,7 @@ int main()
 	unsupported_model_uses_cpu();
 	unknown_windows_identifier_rejected();
 	invalid_thread_count_rejected();
+	displayed_device_uses_completed_session();
 	if (failures != 0) {
 		std::cerr << failures << " assertion(s) failed\n";
 		return 1;
