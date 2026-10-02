@@ -37,11 +37,12 @@ public:
 		return "provider_registration_failed";
 	case ProviderFailureStage::DeviceSelection:
 		return "device_unavailable";
-	case ProviderFailureStage::None:
 	case ProviderFailureStage::Attachment:
 		return "provider_attachment_failed";
+	case ProviderFailureStage::None:
+		return "gpu_session_failed";
 	}
-	return "provider_attachment_failed";
+	return "gpu_session_failed";
 }
 
 // Called only inside an exception handler; diagnostics must not throw again.
@@ -90,39 +91,50 @@ SessionCreationResult create_session_with_operations(Ort::Env &environment, cons
 
 		if (resolved.route == SessionRoute::Gpu) {
 			// This scope destroys the entire GPU candidate/options before CPU construction.
-			bool configured = false;
+			Ort::SessionOptions options{nullptr};
+			bool options_ready = false;
 			try {
-				Ort::SessionOptions options;
+				options = Ort::SessionOptions{};
 				options.SetGraphOptimizationLevel(ORT_ENABLE_ALL);
 				options.DisableMemPattern();
 				options.SetExecutionMode(ORT_SEQUENTIAL);
 				options.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
-				diagnostics.provider_attempt =
-					operations.configure(environment, options, resolved.runtime_provider);
-				configured = diagnostics.provider_attempt->succeeded;
-				if (!configured) {
+				options_ready = true;
+			} catch (...) {
+				capture_exception(diagnostics.error);
+				diagnostics.fallback_reason = "gpu_session_failed";
+			}
+
+			if (options_ready) {
+				try {
+					diagnostics.provider_attempt =
+						operations.configure(environment, options, resolved.runtime_provider);
+				} catch (...) {
+					// No provider result means no failing provider stage was observed.
+					capture_exception(diagnostics.error);
+					diagnostics.fallback_reason = "gpu_session_failed";
+				}
+			}
+
+			if (diagnostics.provider_attempt) {
+				if (!diagnostics.provider_attempt->succeeded) {
 					diagnostics.fallback_reason =
 						fallback_reason(diagnostics.provider_attempt->failure_stage);
 					diagnostics.error = diagnostics.provider_attempt->error;
 				} else {
-					result.session = operations.construct(environment, model, options);
-					if (result.session) {
-						diagnostics.effective_provider = resolved.runtime_provider;
-						diagnostics.outcome = SessionOutcome::Constructed;
-						return result;
+					try {
+						result.session = operations.construct(environment, model, options);
+						if (result.session) {
+							diagnostics.effective_provider = resolved.runtime_provider;
+							diagnostics.outcome = SessionOutcome::Constructed;
+							return result;
+						}
+						diagnostics.fallback_reason = "gpu_session_failed";
+						diagnostics.error = "GPU constructor returned a null session";
+					} catch (...) {
+						capture_exception(diagnostics.error);
+						diagnostics.fallback_reason = "gpu_session_failed";
 					}
-					diagnostics.fallback_reason = "gpu_session_failed";
-					diagnostics.error = "GPU constructor returned a null session";
-				}
-			} catch (...) {
-				capture_exception(diagnostics.error);
-				diagnostics.fallback_reason = configured ? "gpu_session_failed"
-									 : "provider_attachment_failed";
-				if (!configured) {
-					diagnostics.provider_attempt = ProviderSessionResult{
-						.requested_provider_name = resolved.runtime_provider,
-						.failure_stage = ProviderFailureStage::Attachment,
-						.error = diagnostics.error};
 				}
 			}
 			result.session.reset();

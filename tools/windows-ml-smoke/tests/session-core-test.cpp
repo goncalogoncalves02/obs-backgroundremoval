@@ -27,6 +27,7 @@ class Operations final : public SessionOperations {
 public:
 	ProviderFailureStage stage{ProviderFailureStage::None};
 	bool throw_config{};
+	bool failed_without_stage{};
 	bool throw_gpu{};
 	bool null_gpu{};
 	bool throw_cpu{};
@@ -52,11 +53,13 @@ public:
 							.hardware_type = "gpu",
 							.vendor_id = 0x1002,
 							.device_id = 0x7550},
-			.succeeded = stage == ProviderFailureStage::None,
+			.succeeded = stage == ProviderFailureStage::None && !failed_without_stage,
 			.failure_stage = stage,
 			.error_hresult = stage == ProviderFailureStage::None ? std::nullopt
 									     : std::optional<std::uint32_t>(0x80004005),
-			.error = stage == ProviderFailureStage::None ? "" : "injected provider failure"};
+			.error = stage == ProviderFailureStage::None && !failed_without_stage
+					 ? ""
+					 : "injected provider failure"};
 	}
 
 	std::unique_ptr<Ort::Session> construct(Ort::Env &environment, const std::filesystem::path &path,
@@ -149,6 +152,17 @@ void test_failures(Ort::Env &env, const std::filesystem::path &model)
 		expect(operations.configurations == 1 && operations.gpu_attempts == 0 && operations.cpu_attempts == 1,
 		       "provider failure must make one CPU attempt");
 	}
+	Operations unstaged;
+	unstaged.failed_without_stage = true;
+	auto unstaged_result = create_session_with_operations(env, model, {"winml-directml", true, 1}, unstaged);
+	expect_cpu(unstaged_result, "unstaged provider failure");
+	expect(unstaged_result.diagnostics.fallback_reason == "gpu_session_failed" &&
+		       unstaged_result.diagnostics.provider_attempt &&
+		       unstaged_result.diagnostics.provider_attempt->failure_stage == ProviderFailureStage::None,
+	       "an unstaged provider result must not be relabelled as attachment failure");
+	expect(unstaged.configurations == 1 && unstaged.gpu_attempts == 0 && unstaged.cpu_attempts == 1,
+	       "unstaged provider failure must make one CPU attempt");
+
 	for (int mode = 0; mode < 3; ++mode) {
 		Operations operations;
 		operations.throw_config = mode == 0;
@@ -158,9 +172,18 @@ void test_failures(Ort::Env &env, const std::filesystem::path &model)
 		expect_cpu(result, "gpu_failure_builds_clean_cpu_options");
 		expect(result.diagnostics.requested_provider == "winml-directml" && !result.diagnostics.error.empty(),
 		       "requested ID/original failure lost");
-		expect(result.diagnostics.fallback_reason ==
-			       (mode == 0 ? "provider_attachment_failed" : "gpu_session_failed"),
-		       "exception/null fallback reason incorrect");
+		expect(result.diagnostics.fallback_reason == "gpu_session_failed",
+		       "unknown GPU setup/session failure must not invent an attachment reason");
+		if (mode == 0) {
+			expect(!result.diagnostics.provider_attempt,
+			       "thrown configuration must not invent a provider attempt or attachment stage");
+			expect(result.diagnostics.error == "injected configuration exception",
+			       "thrown configuration must retain the original exception");
+		} else {
+			expect(result.diagnostics.provider_attempt && result.diagnostics.provider_attempt->succeeded &&
+				       result.diagnostics.provider_attempt->failure_stage == ProviderFailureStage::None,
+			       "constructor failure must retain the observed successful provider attempt");
+		}
 		expect(operations.configurations == 1 && operations.gpu_attempts == (mode == 0 ? 0 : 1) &&
 			       operations.cpu_attempts == 1,
 		       "fallback attempt count incorrect");
