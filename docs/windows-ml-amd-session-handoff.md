@@ -6,47 +6,59 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Windows ML AMD project handoff
 
-Snapshot date: 2026-10-02
+Snapshot date: 2026-10-03
 
-This document is the durable entry point for continuing the Windows ML AMD work in a new session. Verify remote branch heads, CI, and artifact availability before treating the evidence below as current. Sprint 5 source review, exact-head Windows CI, package inspection, and owner OBS CPU acceptance have passed. This documentation-only `GPU` handoff records the accepted feature and artifact durably; no Sprint 6 implementation is authorized by that acceptance.
+This document is the durable entry point for continuing the Windows ML AMD work. Sprint 6 source reviews, exact-head Windows CI, independent package inspection, production-core CPU/DirectML/MIGraphX hardware checks, and the owner's combined CPU → DirectML → CPU OBS acceptance have passed. MediaPipe DirectML is now usable on the tested RX 9070 XT setup. Verify live branches, CI and artifact availability before resuming; this is an acceptance snapshot, not a release or deployment record.
 
-## Repository and branch state
+## Current repository and branch state
 
-- Repository: `goncalogoncalves02/obs-backgroundremoval`
-- Durable documentation branch: `GPU`
-- Implementation branch: `feature/windows-ml-amd`
-- Draft pull request: <https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/1>
-- Tested and accepted feature head: `74b0498d197288e54f932b818bb9e857b984db7f`. Keep this exact head unchanged while recording acceptance on `GPU`.
-- Before this handoff commit, local and remote `GPU` were at `9683cb4a895e2140bc035a46dfa49754a5118062`.
-- `main` has not received this feature. No merge, release, or deployment is implied.
-- PR #1 remains draft with `windows-only-ci` and `upload-artifacts`. Native Linux/macOS CI was not run in this iteration; a later full-matrix merge/release gate still requires removal of the quota-conservation label.
-- This `GPU` update must contain only this handoff document, without copying or merging feature implementation files.
-- Preserve the owner's untracked `obs-backgroundremoval-amd-windows-ml-roadmap.md`; do not stage, rewrite, or delete it.
+- Repository: `goncalogoncalves02/obs-backgroundremoval`.
+- Durable documentation branch: `GPU`; before this documentation update its head was `0ea4ef13497747dc0ddceb1788ac73eb95967e66`.
+- Accepted Sprint 6 implementation: `feature/windows-ml-amd-sprint-6`, source `a390fcb4f2f6cdd9beba14e3024edc41b7860cc0`.
+- [PR #2](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/2) remains open and draft, with `windows-only-ci` and `upload-artifacts` at this snapshot.
+- Production-core hardware evidence uses `5f1b52fcb521825014e5dff5d5289ee82a8c66e4`; the later accepted source adds the bounded CPU/DirectML selector/status and Portuguese locale packaging without changing that backend.
+- Accepted Sprint 5 remains on `feature/windows-ml-amd` at `74b0498d197288e54f932b818bb9e857b984db7f`; [PR #1](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/1) remains draft.
+- `main` remains `9772c540279cc84b8c5be5442c50ccb00b399a6e` and has not received either feature. No merge, public release or deployment is recorded.
+- This `GPU` change contains documentation only. Preserve the owner's untracked files, including `.aws`; do not inspect, stage, rewrite or delete them.
+
+## Current acceptance and scope
+
+Read [Windows ML session integration and acceptance](windows-ml-session-integration.md) for exact source/artifact hashes, CI links, commands, hardware results and evidence limits. The latest exact plugin passed the owner's fresh-install live OBS test: CPU → DirectML → CPU with MediaPipe, visible working mask and GPU status, then filter removal/recreation without a crash. The collector reported 3 CPU sessions, 9 DirectML sessions, 0 CPU fallbacks, 2 destructions and 0 relevant errors. Complete owner logs remain local; this record uses the supplied sanitized collector summary and explicit visual answers. The owner observed no substantial visible reduction in overall CPU percentage; this was not a controlled measurement, and whole-OBS CPU reduction is not demonstrated by the inference benchmark.
+
+The owner approved the bounded Background Removal CPU/DirectML selector and effective-session status on 2026-10-02 (“Sim, implementa assim”). That approval supersedes the original Sprint 6/Sprint 7 UI boundary only for this extension, and the combined live test replaces the separate CPU-only OBS gate. It does not authorize a full next sprint. CPU remains the default and alternative; MIGraphX remains an optional implemented backend without a UI choice. Enhancement UI, model expansion, adapter selection, provider acquisition in OBS and loader/search-path hooks are not implemented by this extension.
 
 ## How the work is organized
 
-Architectural work is divided into independently reviewable sprints. Each implementation task gets a task-scoped implementer and an independent review, followed by a whole-sprint review and exact-head verification. Durable plans and specifications live under `docs/superpowers/`; transient agent reports, downloaded dependencies, logs, artifacts, and receipts live under the ignored `/.superpowers/` directory.
+Architectural work uses independently reviewable sprints, task-scoped implementers and independent reviews, followed by whole-sprint review and exact-head verification. Durable plans/specifications live under `docs/superpowers/`; transient reports, logs, artifacts and receipts stay under ignored `/.superpowers/`.
 
-Read these documents in order on `GPU`:
+Current immutable feature documents:
 
-1. `docs/superpowers/specs/2026-08-24-windows-ml-amd-design.md`
-2. `docs/superpowers/plans/2026-08-23-windows-ml-amd-roadmap.md` — historical roadmap; later sprint decisions supersede its initial provider priority and dependency assumptions.
-3. `docs/superpowers/plans/2026-08-24-windows-ml-amd-sprint-1.md`
-4. `docs/superpowers/plans/2026-08-24-windows-ml-amd-sprint-2.md`
-5. `docs/superpowers/plans/2026-08-24-windows-ml-amd-sprint-3.md`
-6. `docs/superpowers/plans/2026-08-24-windows-ml-amd-sprint-4.md`
-7. `docs/windows-ml-baseline.md`
-8. `docs/windows-ml-provider-discovery.md`
-9. `docs/windows-ml-inference-comparison.md`
+- [Sprint 6 approved session design](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/a390fcb4f2f6cdd9beba14e3024edc41b7860cc0/docs/superpowers/specs/2026-10-02-windows-ml-amd-sprint-6-design.md).
+- [Sprint 6 implementation plan](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/a390fcb4f2f6cdd9beba14e3024edc41b7860cc0/docs/superpowers/plans/2026-10-02-windows-ml-amd-sprint-6.md).
+- [Bounded DirectML UI usage and owner approval](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/a390fcb4f2f6cdd9beba14e3024edc41b7860cc0/docs/windows-ml-directml-ui.md).
 
-Sprint 5 specification and implementation plan are on the feature branch, not `GPU`. Read their immutable tested versions:
+The plan retains its original pre-execution status, and both documents retain the original UI boundary wording; the explicit bounded approval and accepted combined gate above supersede those historical statements. Do not copy feature code or these feature documents onto `GPU` to follow the links.
 
-- [Sprint 5 build and packaging specification](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/74b0498d197288e54f932b818bb9e857b984db7f/docs/superpowers/specs/2026-08-30-windows-ml-amd-sprint-5-design.md)
-- [Sprint 5 implementation plan](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/74b0498d197288e54f932b818bb9e857b984db7f/docs/superpowers/plans/2026-08-30-windows-ml-amd-sprint-5.md)
+Historical foundation references on `GPU`: `docs/superpowers/specs/2026-08-24-windows-ml-amd-design.md`, `docs/superpowers/plans/2026-08-23-windows-ml-amd-roadmap.md`, Sprint 1–4 plans, `docs/windows-ml-baseline.md`, `docs/windows-ml-provider-discovery.md` and `docs/windows-ml-inference-comparison.md`. Later approved decisions supersede the initial roadmap's provider priority and dependency assumptions.
 
-Do not copy those files or feature code to `GPU` merely to follow the links. The contribution, maintainer, signing, and DCO prerequisites were explicitly confirmed for this execution. Every project commit uses the owner's identity, signing key `460B18400D17462FF3714A2BDCED30418A1C06FC`, and DCO sign-off, with no assistant/co-author attribution.
+Historical immutable Sprint 5 documents:
 
-## Completed source work
+- [Build and packaging specification](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/74b0498d197288e54f932b818bb9e857b984db7f/docs/superpowers/specs/2026-08-30-windows-ml-amd-sprint-5-design.md).
+- [Implementation plan](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/74b0498d197288e54f932b818bb9e857b984db7f/docs/superpowers/plans/2026-08-30-windows-ml-amd-sprint-5.md).
+
+Contribution/maintainer, signing and DCO prerequisites were explicitly confirmed for this execution. Project commits use the owner's identity, signing key `460B18400D17462FF3714A2BDCED30418A1C06FC` and DCO, without assistant/co-author attribution.
+
+## Sprint 6 completed source and acceptance
+
+Production Windows sessions share the tested provider module and session core. CPU and both exact GPU routes have truthful diagnostics; eligible GPU initialization prohibits node-level CPU fallback, while initialization failure may create one fresh, explicitly reported CPU session. Unknown identifiers fail, unsupported GPU models report CPU fallback, and failed metadata/allocation leaves no stale usable session. Model-lock serialization and session-before-environment destruction are preserved.
+
+The plugin ZIP now requires pinned `DirectML.dll` alongside the Windows ML API and its single ONNX Runtime. The bounded Windows Background Removal selector exposes CPU and DirectML, recreates sessions through existing serialized initialization and displays the completed effective provider or failure. No provider acquisition runs in OBS. Non-Windows standalone ONNX Runtime behavior remains unchanged; native Linux/macOS matrix execution is still pending for integration/release.
+
+Independent task/whole-sprint source reviews and the scoped UI review passed. Exact source `a390fcb4f2f6cdd9beba14e3024edc41b7860cc0` passed Check CI `37070839666` and PR Check `37070840029` / Windows job `111049640434`, including actual `/WX` plugin compilation, 64 ordered adapter lifecycles, native tests and package verification. Both GPU routes and CPU passed the same production-core hardware harness; the new exact plugin separately passed the owner's combined OBS gate. Details and limits are in the integration record.
+
+## Historical completed source work — Sprints 1–5
+
+The following sections preserve earlier accepted evidence. Sprint 5's absence of DirectML and provider UI describes that historical source/package only; Sprint 6 above supersedes that production state.
 
 ### Sprint 1 — baseline and isolation
 
@@ -109,7 +121,7 @@ DirectML comparison with CPU fallback disabled:
 - Foreground IoU: 1.000000
 - Accuracy and performance gates passed
 
-These results established DirectML as the selected primary direction for later production GPU integration, with MIGraphX a validated secondary provider. Sprint 5 deliberately limited production integration to the runtime/build/package and CPU compatibility; Sprint 6 still requires a reviewed design and owner approval before implementation.
+These results established DirectML as the selected primary direction for later production GPU integration, with MIGraphX a validated secondary provider. Sprint 5 deliberately limited production integration to the runtime/build/package and CPU compatibility. That historical decision was implemented and accepted in Sprint 6; see the current integration record.
 
 Historical exact-head evidence for Sprint 4 feature head `bbd46cf7f1e3f3125dec85850534f47760b89790`:
 
@@ -120,9 +132,9 @@ Historical exact-head evidence for Sprint 4 feature head `bbd46cf7f1e3f3125dec85
 - Plugin artifact: <https://github.com/goncalogoncalves02/obs-backgroundremoval/actions/runs/32796849543/artifacts/9545266577>
   - SHA-256: `78d359cfa4ca8d3b0adc2d985759627993745dd6fa7c38792a9512f5e5230ec9`
 
-That historical plugin artifact predates Sprint 5 and uses standalone Windows ONNX Runtime. Use the Sprint 5 artifact below for the accepted Windows ML-integrated CPU package.
+That historical plugin artifact predates Sprint 5 and uses standalone Windows ONNX Runtime. The Sprint 5 artifact below records the historical Windows ML CPU acceptance; use the current Sprint 6 integration record for the accepted DirectML package.
 
-## Sprint 5 exact-head CI and artifact evidence
+## Historical Sprint 5 exact-head CI and artifact evidence
 
 Accepted feature SHA: `74b0498d197288e54f932b818bb9e857b984db7f`.
 
@@ -161,7 +173,7 @@ SHA-256 of accepted extracted files:
 | `obs-backgroundremoval/licenses/windows-ml-license.txt` | `66395f8cb219087fae2bd025010bd9076b736c14f03b48f20295471c0c376814` |
 | `obs-backgroundremoval/licenses/windows-ml-third-party-notices.txt` | `fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866` |
 
-## Owner OBS CPU acceptance — 2026-10-02
+## Historical Sprint 5 owner OBS CPU acceptance — 2026-10-02
 
 The owner installed the supplied exact Sprint 5 artifact using the provided installation procedure, reported visibly functional MediaPipe CPU background removal, and explicitly confirmed removal/recreation without a crash: “Sim, recriei e funcionou sem crash”.
 
@@ -191,13 +203,10 @@ The optional PowerShell log-copy step failed because `$work` was null in that sh
 
 Only the sanitized plugin lines and necessary hardware/version facts are retained here. The full owner log, filesystem paths, device identifiers, browser/widget URLs, and unrelated module messages are not durable evidence. This is a MediaPipe CPU compatibility acceptance on the owner's machine; it does not establish production GPU acceleration, a clean-machine deployment result, a long-duration stability result, or native Linux/macOS acceptance.
 
-## Sprint 6 entry decision and next session
+## Next session and remaining gates
 
-The accepted runtime/package is ready for Sprint 6 design work. DirectML is the previously selected primary direction, but the production-provider design, acquisition/deployment policy, lifecycle/fallback behavior, and final scope still require review and owner approval before implementation. Do not begin implementing a provider, loader, acquisition flow, or UI merely because Sprint 5 CPU acceptance passed.
-
-1. Verify publication/readback of this signed documentation-only `GPU` commit, exact local/remote feature SHA, PR draft state, and preserved labels. Keep the tested feature head at `74b0498d197288e54f932b818bb9e857b984db7f`.
-2. Reconcile `AGENTS.md`, any applicable local instructions, this handoff, the ignored sprint ledger, worktrees, and current diffs before new work. Preserve the owner's untracked roadmap.
-3. Read the approved Sprint 5 documents at the immutable feature links above. Use the historical Sprint 4 comparison to inform the next design, with its older environment clearly distinguished.
-4. Explore and document the Sprint 6 provider design, revalidate current version-specific official documentation, and bring one material decision at a time to the owner. Obtain explicit design/implementation approval before code generation for the next sprint.
-5. Keep production CPU compatibility intact. DirectML remains unintegrated and `DirectML.dll` remains absent until the next approved integration. No provider acquisition, UI, inference-session, or loader changes are authorized by this handoff.
-6. Before a later merge or release, run the full native platform matrix. The historical roadmap (`docs/superpowers/plans/2026-08-23-windows-ml-amd-roadmap.md`, final release checklist) separately requires GPU/model verification, provider-switch and filter-lifetime cycles, clean-machine installation, and long-duration stability/recording tests for eventual release. A green Sprint 5 Windows job and this CPU test do not replace those established release gates.
+1. Reconcile `AGENTS.md`, this handoff, the ignored Sprint 6 ledger, worktrees and diffs. Preserve owner files and the accepted Sprint 5 and Sprint 6 source heads; do not restart completed implementation or hardware checks from historical pending entries.
+2. Verify the signed documentation-only `GPU` publication/readback, live branch heads, PR draft state, exact-SHA CI and artifact availability. Artifact retention is finite.
+3. Continue using MediaPipe with DirectML or CPU on the accepted setup. Consult the immutable UI usage guide and integration record when diagnosing effective-provider status; MIGraphX remains optional without a selector.
+4. Obtain new owner direction and any required design approval before implementing the next sprint or expanding UI/models. This acceptance does not authorize merge, public release or deployment.
+5. Before integration/release, run the full native platform matrix, including removal of the quota-conservation label for that run. Clean-machine installation, long-duration stability, recording and broader GPU/model verification remain release gates. The short live switching/recreation check and 64 native adapter lifecycles do not replace them.
