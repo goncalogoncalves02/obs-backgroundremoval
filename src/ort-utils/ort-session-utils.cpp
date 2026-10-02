@@ -277,8 +277,10 @@ int createOrtSession(filter_data *tf)
 			bfree(path);
 		};
 		std::unique_ptr<char, decltype(freePath)> path(obs_module_file(tf->modelSelection.c_str()), freePath);
-		return createWindowsMlOrtSession(tf,
-						 path ? std::filesystem::u8path(path.get()) : std::filesystem::path{});
+		const std::string_view utf8Path = path ? path.get() : "";
+		return createWindowsMlOrtSession(
+			tf, path ? std::filesystem::path(std::u8string(utf8Path.begin(), utf8Path.end()))
+				 : std::filesystem::path{});
 	} catch (const std::exception &error) {
 		beginWindowsMlInitialization(*tf);
 		const int code =
