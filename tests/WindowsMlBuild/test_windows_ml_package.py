@@ -80,16 +80,91 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(str(api_dll), result.stderr)
 
-    def test_directml_dll_is_prohibited_even_when_nested(self):
-        directml = self.install_root / "nested" / "runtime" / "DirectML.dll"
-        directml.parent.mkdir(parents=True)
-        directml.write_bytes(b"prohibited runtime")
-        self._write_archive()
+    def test_missing_directml_is_rejected(self):
+        for content in (None, b""):
+            for artifact in ("tree", "archive"):
+                with self.subTest(content=content, artifact=artifact):
+                    self.setUp()
+                    directml = self.install_root / PLUGIN_BIN / "DirectML.dll"
+                    if content is None:
+                        directml.unlink()
+                    else:
+                        directml.write_bytes(content)
+                    result = self._verify_directml_mutation(artifact)
+                    self.assertIn("required non-empty file is missing", result.stderr)
 
+    def test_tampered_directml_is_rejected(self):
+        for artifact in ("tree", "archive"):
+            with self.subTest(artifact=artifact):
+                self.setUp()
+                self.install_root.joinpath(PLUGIN_BIN, "DirectML.dll").write_bytes(b"tampered directml")
+                result = self._verify_directml_mutation(artifact)
+                self.assertIn("does not match the Windows ML package", result.stderr)
+
+    def test_duplicate_or_misplaced_directml_is_rejected(self):
+        for artifact in ("tree", "archive"):
+            for layout in ("nested_duplicate", "mixed_case_duplicate", "misplaced"):
+                with self.subTest(artifact=artifact, layout=layout):
+                    self.setUp()
+                    directml = self.install_root / PLUGIN_BIN / "DirectML.dll"
+                    if layout == "mixed_case_duplicate":
+                        if artifact == "tree" and sys.platform == "win32":
+                            # Windows cannot represent two paths differing only by case.
+                            # The nested duplicate still exercises tree case folding.
+                            destination = self.install_root / "nested" / "dIrEcTmL.DlL"
+                        else:
+                            destination = directml.with_name("dIrEcTmL.DlL")
+                    else:
+                        destination = self.install_root / "nested" / "dIrEcTmL.DlL"
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if artifact == "archive" and layout == "mixed_case_duplicate":
+                        with zipfile.ZipFile(self.archive, "a") as package:
+                            package.writestr((PLUGIN_BIN / "dIrEcTmL.DlL").as_posix(), directml.read_bytes())
+                        result = self._verify()
+                        self._assert_entry_error(result, "dIrEcTmL.DlL")
+                    else:
+                        if layout == "misplaced":
+                            directml.replace(destination)
+                        else:
+                            shutil.copyfile(directml, destination)
+                        result = self._verify_directml_mutation(artifact)
+                        self.assertRegex(result.stderr, "exactly one|non-empty file is missing")
+
+    def test_archive_only_directml_corruption_names_entry(self):
+        entry_name = (PLUGIN_BIN / "DirectML.dll").as_posix()
+        for compression, offset, replacement, expected in (
+            (zipfile.ZIP_STORED, 0, 0, zipfile.BadZipFile),
+            (zipfile.ZIP_DEFLATED, 0, 0x07, zlib.error),
+            (zipfile.ZIP_BZIP2, 0, 0, OSError),
+            (zipfile.ZIP_LZMA, 4, 0xFF, lzma.LZMAError),
+        ):
+            with self.subTest(compression=compression):
+                self.setUp()
+                self._damage_archive_payload(entry_name, compression, offset, replacement)
+                self._assert_damaged_archive_error(entry_name, expected)
+
+    def _verify_directml_mutation(self, artifact):
+        if artifact == "archive":
+            self._write_archive()
+            # Repair only the install tree, so ZIP defects cannot be hidden by tree failures.
+            for entry in self.install_root.rglob("*"):
+                if entry.is_file() and entry.name.casefold() == "directml.dll":
+                    entry.unlink()
+            shutil.copyfile(
+                self.windows_ml_root / "runtimes/win-x64/native/DirectML.dll",
+                self.install_root / PLUGIN_BIN / "DirectML.dll",
+            )
         result = self._verify()
+        self._assert_entry_error(result, "DirectML.dll")
+        return result
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("DirectML.dll is prohibited in the Sprint 5 plugin package", result.stderr)
+    def _assert_entry_error(self, result, entry_name):
+        self.assertEqual(result.returncode, 1, self._diagnostic(result))
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(len(result.stderr.splitlines()), 1, self._diagnostic(result))
+        self.assertEqual(result.stderr.count("package-contract-error:"), 1)
+        self.assertIn(entry_name.casefold(), result.stderr.casefold())
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_missing_or_changed_legal_file_is_rejected(self):
         legal_file = self.install_root / PLUGIN_LICENSES / "windows-ml-license.txt"
@@ -320,6 +395,7 @@ class WindowsMlPackageTest(unittest.TestCase):
             self.windows_ml_root / "ThirdPartyNotices.txt": b"windows ml notices",
             native_directory / "Microsoft.Windows.AI.MachineLearning.dll": b"windows ml api",
             native_directory / "onnxruntime.dll": b"windows ml runtime",
+            native_directory / "DirectML.dll": b"windows ml directml",
         }
         for path, contents in package_files.items():
             path.write_bytes(contents)
@@ -334,6 +410,7 @@ class WindowsMlPackageTest(unittest.TestCase):
             plugin_bin / "Microsoft.Windows.AI.MachineLearning.dll",
         )
         shutil.copyfile(native_directory / "onnxruntime.dll", plugin_bin / "onnxruntime.dll")
+        shutil.copyfile(native_directory / "DirectML.dll", plugin_bin / "DirectML.dll")
         shutil.copyfile(self.windows_ml_root / "license.txt", plugin_licenses / "windows-ml-license.txt")
         shutil.copyfile(
             self.windows_ml_root / "ThirdPartyNotices.txt",

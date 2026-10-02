@@ -65,19 +65,16 @@ endif()
 
 find_package(microsoft.windows.ai.machinelearning CONFIG REQUIRED)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/onnxruntime_backend.cmake")
+file(REAL_PATH "${microsoft.windows.ai.machinelearning_DIR}/../.." windows_ml_package_root)
+resolve_windows_ml_directml_dll("${windows_ml_package_root}" WINDOWS_ML_DIRECTML_DLL)
+
 enable_testing()
 
 add_windows_ml_session_core()
 add_executable(windows-ml-session-core-test tests/session-core-test.cpp)
 target_link_libraries(windows-ml-session-core-test PRIVATE windows-ml-session-core)
-add_custom_command(
-  TARGET windows-ml-session-core-test
-  POST_BUILD
-  COMMAND
-    "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:windows-ml-session-core-test>
-    $<TARGET_FILE_DIR:windows-ml-session-core-test>
-  COMMAND_EXPAND_LISTS
-)
+stage_windows_ml_runtime(windows-ml-session-core-test)
 add_test(
   NAME windows-ml-session-core
   COMMAND windows-ml-session-core-test "${CMAKE_CURRENT_SOURCE_DIR}/../../data/models/mediapipe.onnx"
@@ -98,13 +95,7 @@ target_link_libraries(
     windows-ml-session-core
 )
 
-add_custom_command(
-  TARGET windows-ml-smoke
-  POST_BUILD
-  COMMAND
-    "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:windows-ml-smoke> $<TARGET_FILE_DIR:windows-ml-smoke>
-  COMMAND_EXPAND_LISTS
-)
+stage_windows_ml_runtime(windows-ml-smoke)
 
 add_executable(windows-ml-smoke-inference-metadata-test tests/inference-metadata-test.cpp inference-runner.cpp)
 target_compile_features(windows-ml-smoke-inference-metadata-test PRIVATE cxx_std_20)
@@ -114,14 +105,7 @@ target_link_libraries(
   PRIVATE windows-ml-smoke-benchmark windows-ml-session-core
 )
 
-add_custom_command(
-  TARGET windows-ml-smoke-inference-metadata-test
-  POST_BUILD
-  COMMAND
-    "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:windows-ml-smoke-inference-metadata-test>
-    $<TARGET_FILE_DIR:windows-ml-smoke-inference-metadata-test>
-  COMMAND_EXPAND_LISTS
-)
+stage_windows_ml_runtime(windows-ml-smoke-inference-metadata-test)
 
 add_test(
   NAME windows-ml-smoke-inference-metadata

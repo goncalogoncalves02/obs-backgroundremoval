@@ -1,6 +1,36 @@
 # SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
+# DirectML has no import library; validate its explicit deployment source.
+function(resolve_windows_ml_directml_dll PACKAGE_ROOT RESULT_VARIABLE)
+  file(REAL_PATH "${PACKAGE_ROOT}" canonical_package_root)
+  set(directml_dll "${canonical_package_root}/runtimes/win-x64/native/DirectML.dll")
+  if(NOT EXISTS "${directml_dll}" OR IS_DIRECTORY "${directml_dll}")
+    message(
+      FATAL_ERROR
+      "Microsoft.Windows.AI.MachineLearning is missing required non-empty runtime file ${directml_dll}."
+    )
+  endif()
+  file(SIZE "${directml_dll}" directml_size)
+  if(directml_size EQUAL 0)
+    message(
+      FATAL_ERROR
+      "Microsoft.Windows.AI.MachineLearning is missing required non-empty runtime file ${directml_dll}."
+    )
+  endif()
+  file(REAL_PATH "${directml_dll}" canonical_directml_dll)
+  set(expected_directml_path "${directml_dll}")
+  set(resolved_directml_path "${canonical_directml_dll}")
+  if(CMAKE_HOST_WIN32)
+    string(TOLOWER "${expected_directml_path}" expected_directml_path)
+    string(TOLOWER "${resolved_directml_path}" resolved_directml_path)
+  endif()
+  if(NOT expected_directml_path STREQUAL resolved_directml_path)
+    message(FATAL_ERROR "DirectML.dll must be located inside the validated Windows ML package: ${directml_dll}.")
+  endif()
+  set("${RESULT_VARIABLE}" "${canonical_directml_dll}" PARENT_SCOPE)
+endfunction()
+
 function(add_onnxruntime_backend TARGET_NAME EXPECTED_WINDOWS_ML_VERSION REQUESTED_WINDOWS_ML_DIRECTORY)
   if(TARGET "${TARGET_NAME}")
     message(FATAL_ERROR "ONNX Runtime backend target '${TARGET_NAME}' already exists.")
@@ -9,7 +39,7 @@ function(add_onnxruntime_backend TARGET_NAME EXPECTED_WINDOWS_ML_VERSION REQUEST
   add_library("${TARGET_NAME}" INTERFACE)
 
   if(WIN32)
-    set(windows_ml_package_state_schema_version 1)
+    set(windows_ml_package_state_schema_version 2)
     set(has_one_shot_windows_ml_directory FALSE)
     set(has_package_windows_ml_directory FALSE)
     if(DEFINED CACHE{WINDOWS_ML_PACKAGE_CONFIG_DIR})
@@ -172,6 +202,7 @@ function(add_onnxruntime_backend TARGET_NAME EXPECTED_WINDOWS_ML_VERSION REQUEST
     cmake_path(GET resolved_windows_ml_directory PARENT_PATH windows_ml_build_dir)
     cmake_path(GET windows_ml_build_dir PARENT_PATH windows_ml_package_root)
     cmake_path(NORMAL_PATH windows_ml_package_root)
+    resolve_windows_ml_directml_dll("${windows_ml_package_root}" windows_ml_directml_dll)
     set(windows_ml_license_file "${windows_ml_package_root}/license.txt")
     set(windows_ml_third_party_notices_file "${windows_ml_package_root}/ThirdPartyNotices.txt")
 
@@ -199,6 +230,7 @@ function(add_onnxruntime_backend TARGET_NAME EXPECTED_WINDOWS_ML_VERSION REQUEST
     )
 
     set(WINDOWS_ML_PACKAGE_ROOT "${windows_ml_package_root}" PARENT_SCOPE)
+    set(WINDOWS_ML_DIRECTML_DLL "${windows_ml_directml_dll}" PARENT_SCOPE)
     set(WINDOWS_ML_LICENSE_FILE "${windows_ml_license_file}" PARENT_SCOPE)
     set(WINDOWS_ML_THIRD_PARTY_NOTICES_FILE "${windows_ml_third_party_notices_file}" PARENT_SCOPE)
     return()

@@ -20,6 +20,7 @@ RUNTIME_FILES = (
     "obs-backgroundremoval.dll",
     "Microsoft.Windows.AI.MachineLearning.dll",
     "onnxruntime.dll",
+    "DirectML.dll",
 )
 LEGAL_MAP = {
     "windows-ml-license.txt": "license.txt",
@@ -131,8 +132,10 @@ def verify_install_tree(install_root: Path, windows_ml_root: Path) -> None:
         raise PackageContractError(
             "install tree must contain exactly one Microsoft.Windows.AI.MachineLearning.dll beside the plugin"
         )
-    if files_named(entries, "DirectML.dll"):
-        raise PackageContractError("DirectML.dll is prohibited in the Sprint 5 plugin package")
+    directml_files = files_named(entries, "DirectML.dll")
+    if directml_files != [plugin_bin / "DirectML.dll"]:
+        raise PackageContractError("install tree must contain exactly one DirectML.dll beside the plugin")
+    require_same_file(plugin_bin / "DirectML.dll", package_native / "DirectML.dll")
     require_same_file(plugin_bin / "onnxruntime.dll", package_native / "onnxruntime.dll")
     require_same_file(
         plugin_bin / "Microsoft.Windows.AI.MachineLearning.dll",
@@ -223,8 +226,15 @@ def verify_archive(archive_path: Path, windows_ml_root: Path) -> None:
             raise PackageContractError(
                 "archive must contain exactly one Microsoft.Windows.AI.MachineLearning.dll beside the plugin"
             )
-        if archive_files_named(entries, "DirectML.dll"):
-            raise PackageContractError("DirectML.dll is prohibited in the Sprint 5 plugin package")
+        directml_files = archive_files_named(entries, "DirectML.dll")
+        if [path for path, _ in directml_files] != [PurePosixPath(PLUGIN_BIN / "DirectML.dll")]:
+            raise PackageContractError("archive must contain exactly one DirectML.dll beside the plugin")
+        require_archive_same_file(
+            archive,
+            entries,
+            PLUGIN_BIN / "DirectML.dll",
+            package_native / "DirectML.dll",
+        )
 
         require_archive_same_file(
             archive,

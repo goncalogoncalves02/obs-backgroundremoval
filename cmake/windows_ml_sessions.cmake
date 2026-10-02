@@ -41,3 +41,19 @@ function(add_windows_ml_session_core)
     PUBLIC windows-ml-provider-policy windows-ml-session-policy WindowsML::Api WindowsML::OnnxRuntime
   )
 endfunction()
+
+# WindowsML::DirectML is INTERFACE-only, so TARGET_RUNTIME_DLLS omits it.
+# Call after the backend or smoke package validated WINDOWS_ML_DIRECTML_DLL.
+function(stage_windows_ml_runtime TARGET_NAME)
+  if(NOT WINDOWS_ML_DIRECTML_DLL)
+    message(FATAL_ERROR "A validated WINDOWS_ML_DIRECTML_DLL is required for native runtime staging.")
+  endif()
+  add_custom_command(
+    TARGET "${TARGET_NAME}"
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:${TARGET_NAME}> "${WINDOWS_ML_DIRECTML_DLL}"
+      $<TARGET_FILE_DIR:${TARGET_NAME}>
+    COMMAND_EXPAND_LISTS
+  )
+endfunction()

@@ -36,6 +36,120 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
             f"links=WindowsML::Api;WindowsML::OnnxRuntime\nroot={package_root.resolve().as_posix()}\n",
         )
 
+    def test_windows_package_exports_canonical_directml_path(self):
+        package_root = self._create_windows_ml_package()
+        result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=str(package_root / "build" / "cmake") + "/../cmake",
+        )
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertEqual(
+            self.fixture_root.joinpath("build", "directml.txt").read_text(),
+            (package_root.resolve() / "runtimes/win-x64/native/DirectML.dll").as_posix(),
+        )
+        repeated_result = self._reconfigure_without_flags()
+        self.assertEqual(repeated_result.returncode, 0, self._diagnostic(repeated_result))
+        self.assertEqual(
+            self.fixture_root.joinpath("build", "directml.txt").read_text(),
+            (package_root.resolve() / "runtimes/win-x64/native/DirectML.dll").as_posix(),
+        )
+
+    def test_windows_package_rejects_missing_empty_or_directory_directml_before_caching(self):
+        for invalid_file in ("missing", "empty", "directory"):
+            with self.subTest(invalid_file=invalid_file):
+                self.setUp()
+                package_root = self._create_windows_ml_package()
+                directml = package_root / "runtimes/win-x64/native/DirectML.dll"
+                directml.unlink()
+                if invalid_file == "empty":
+                    directml.touch()
+                elif invalid_file == "directory":
+                    directml.mkdir()
+                result, _ = self._configure(
+                    system_name="Windows",
+                    expected_windows_ml_version="2.2.12",
+                    windows_ml_directory=package_root / "build" / "cmake",
+                )
+                self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+                self.assertIn("DirectML.dll", self._combined_output(result))
+                repeated_result = self._reconfigure_without_flags()
+                self.assertNotEqual(repeated_result.returncode, 0, self._diagnostic(repeated_result))
+                self.assertIn("No validated Windows ML package state", self._combined_output(repeated_result))
+
+    def test_windows_package_rejects_historical_schema_without_fresh_selection(self):
+        package_root = self._create_windows_ml_package()
+        result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_state_schema="1",
+            windows_ml_state_directory=package_root / "build" / "cmake",
+        )
+        self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertIn("unsupported Windows ML package state schema '1'", self._combined_output(result))
+        fresh_result, _ = self._configure(
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_root / "build" / "cmake",
+        )
+        self.assertEqual(fresh_result.returncode, 0, self._diagnostic(fresh_result))
+        repeated_result = self._reconfigure_without_flags()
+        self.assertEqual(repeated_result.returncode, 0, self._diagnostic(repeated_result))
+
+    def test_root_installs_exported_directml_once(self):
+        package_root = self._create_windows_ml_package()
+        result, _ = self._configure(
+            fixture_win32=True,
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_root / "build" / "cmake",
+            root_install_contract=True,
+        )
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        prefix = self.fixture_root / "install"
+        install_result = subprocess.run(
+            [self.cmake_command, "--install", str(self.fixture_root / "build"), "--prefix", str(prefix)],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(install_result.returncode, 0, self._diagnostic(install_result))
+        installed = prefix / "obs-backgroundremoval/bin/64bit/DirectML.dll"
+        self.assertTrue(installed.is_file(), self._diagnostic(install_result))
+        self.assertEqual(installed.read_bytes(), b"directml")
+        self.assertEqual(list(prefix.rglob("DirectML.dll")), [installed])
+        manifest = self.fixture_root.joinpath("build", "install_manifest.txt").read_text().splitlines()
+        self.assertEqual([Path(entry).resolve() for entry in manifest], [installed.resolve()])
+
+    def test_runtime_staging_copies_directml_beside_executable(self):
+        package_root = self._create_windows_ml_package()
+        result, _ = self._configure(
+            fixture_win32=True,
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_root / "build" / "cmake",
+            staging_contract=True,
+        )
+        self.assertEqual(result.returncode, 0, self._diagnostic(result))
+        build_result = self._build()
+        self.assertEqual(build_result.returncode, 0, self._diagnostic(build_result))
+        target_dir = Path(self.fixture_root.joinpath("build", "staging-dir.txt").read_text())
+        self.assertEqual(target_dir.joinpath("DirectML.dll").read_bytes(), b"directml")
+        self.assertEqual(list(target_dir.rglob("DirectML.dll")), [target_dir / "DirectML.dll"])
+
+    def test_windows_package_rejects_directml_redirected_outside_the_package(self):
+        package_root = self._create_windows_ml_package()
+        directml = package_root / "runtimes/win-x64/native/DirectML.dll"
+        directml.unlink()
+        outside = self.fixture_root / "outside.dll"
+        outside.write_bytes(b"external directml")
+        try:
+            directml.symlink_to(outside)
+        except OSError as error:
+            self.skipTest(f"symbolic links are unavailable in this environment: {error}")
+        result, _ = self._configure(
+            system_name="Windows",
+            expected_windows_ml_version="2.2.12",
+            windows_ml_directory=package_root / "build" / "cmake",
+        )
+        self.assertNotEqual(result.returncode, 0, self._diagnostic(result))
+        self.assertIn("DirectML.dll", self._combined_output(result))
+
     def test_root_backend_include_resolves_in_an_out_of_source_build(self):
         project_directory = self.fixture_root / "root-project"
         module_directory = project_directory / "cmake"
@@ -245,7 +359,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         result, _ = self._configure(
             system_name="Windows",
             expected_windows_ml_version="2.2.12",
-            windows_ml_state_schema="1",
+            windows_ml_state_schema="2",
             windows_ml_state_directory=self.fixture_root / "missing-stored-package",
         )
 
@@ -303,7 +417,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         )
 
     def test_invalid_fresh_inputs_cannot_reuse_a_previous_marker(self):
-        for invalid_input in ("directory_only", "empty", "missing", "mismatch", "version", "target", "legal"):
+        for invalid_input in ("directory_only", "empty", "missing", "mismatch", "version", "target", "legal", "directml", "directml_empty", "directml_directory"):
             with self.subTest(invalid_input=invalid_input):
                 self.setUp()
                 package_root = self._create_windows_ml_package()
@@ -334,7 +448,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
                 self.assertIn("No validated Windows ML package state", self._combined_output(stored_result))
 
     def test_persisted_package_is_fully_validated_again(self):
-        for invalid_input in ("missing", "version", "target", "legal", "redirect", "decoy", "resolved_mismatch"):
+        for invalid_input in ("missing", "version", "target", "legal", "directml", "directml_empty", "directml_directory", "redirect", "decoy", "resolved_mismatch"):
             with self.subTest(invalid_input=invalid_input):
                 self.setUp()
                 package_root = self._create_windows_ml_package()
@@ -373,7 +487,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
                 )
                 self.assertEqual(first_result.returncode, 0, self._diagnostic(first_result))
                 if invalid_marker == "schema_type":
-                    self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA", "STRING", "1")
+                    self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA", "STRING", "2")
                 elif invalid_marker == "directory_type":
                     self._replace_cache_entry("OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY", "PATH", package_directory)
                 elif invalid_marker == "relative":
@@ -398,7 +512,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, self._diagnostic(result))
         cache = self.fixture_root.joinpath("build", "CMakeCache.txt").read_text()
-        self.assertIn("OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA:INTERNAL=1\n", cache)
+        self.assertIn("OBS_WINDOWS_ML_PACKAGE_STATE_SCHEMA:INTERNAL=2\n", cache)
         self.assertIn(
             f"OBS_WINDOWS_ML_PACKAGE_STATE_DIRECTORY:INTERNAL={package_directory.resolve().as_posix()}\n",
             cache,
@@ -428,6 +542,13 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
             config_file.write_text(config_file.read_text().replace("WindowsML::OnnxRuntime", "Other::Runtime"))
         elif invalid_input == "legal":
             package_root.joinpath("ThirdPartyNotices.txt").unlink()
+        elif invalid_input in ("directml", "directml_empty", "directml_directory"):
+            directml = package_root / "runtimes/win-x64/native/DirectML.dll"
+            directml.unlink()
+            if invalid_input == "directml_empty":
+                directml.touch()
+            elif invalid_input == "directml_directory":
+                directml.mkdir()
 
     def test_windows_package_does_not_cache_the_resolved_directory(self):
         package_root = self._create_windows_ml_package()
@@ -557,6 +678,7 @@ class OnnxRuntimeBackendTest(unittest.TestCase):
         library_directory.mkdir(parents=True)
         native_directory.joinpath("Microsoft.Windows.AI.MachineLearning.dll").write_bytes(b"api")
         native_directory.joinpath("onnxruntime.dll").write_bytes(b"onnxruntime")
+        native_directory.joinpath("DirectML.dll").write_bytes(b"directml")
         library_directory.joinpath("Microsoft.Windows.AI.MachineLearning.lib").write_bytes(b"api import library")
         library_directory.joinpath("onnxruntime.lib").write_bytes(b"onnxruntime import library")
         if include_license:
@@ -606,6 +728,8 @@ set_target_properties(WindowsML::Api PROPERTIES IMPORTED_IMPLIB "${_fixture_root
         windows_ml_state_directory=None,
         fixture_win32=None,
         imported_config_contract=False,
+        root_install_contract=False,
+        staging_contract=False,
     ):
         fixture_directory = self.fixture_root / "project"
         fixture_directory.mkdir(exist_ok=True)
@@ -643,6 +767,7 @@ get_target_property(backend_links OnnxRuntimeBackend INTERFACE_LINK_LIBRARIES)
 file(WRITE "${RESULT_FILE}" "links=${backend_links}\\n")
 if(WIN32)
   file(APPEND "${RESULT_FILE}" "root=${WINDOWS_ML_PACKAGE_ROOT}\\n")
+  file(WRITE "${CMAKE_BINARY_DIR}/directml.txt" "${WINDOWS_ML_DIRECTML_DLL}")
 endif()
 if(IMPORTED_CONFIG_CONTRACT)
   add_library(FixtureRelease SHARED IMPORTED)
@@ -658,6 +783,29 @@ if(IMPORTED_CONFIG_CONTRACT)
 endif()
 """
         )
+        if root_install_contract:
+            root_rules = [
+                line for line in REPOSITORY_ROOT.joinpath("CMakeLists.txt").read_text().splitlines()
+                if line.lstrip().startswith("install(FILES") and "WINDOWS_ML_DIRECTML_DLL" in line
+            ]
+            project_file = fixture_directory / "CMakeLists.txt"
+            project_file.write_text(
+                project_file.read_text()
+                + '\nset(OBS_PLUGIN_BIN_DIR "obs-backgroundremoval/bin/64bit")\n'
+                + "\n".join(root_rules) + "\n"
+            )
+        if staging_contract:
+            fixture_directory.joinpath("main.cpp").write_text("int main() { return 0; }\n")
+            project_file = fixture_directory / "CMakeLists.txt"
+            project_file.write_text(
+                project_file.read_text()
+                + '\nenable_language(CXX)\n'
+                + 'include("${BACKEND_MODULE_DIR}/windows_ml_sessions.cmake")\n'
+                + 'add_executable(staging-fixture main.cpp)\n'
+                + 'set_target_properties(staging-fixture PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/staged/$<0:>")\n'
+                + 'stage_windows_ml_runtime(staging-fixture)\n'
+                + 'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/staging-dir.txt" CONTENT "$<TARGET_FILE_DIR:staging-fixture>")\n'
+            )
         command = [
             self.cmake_command,
             "-S",
