@@ -296,20 +296,6 @@ jobs:
             $SMOKE_ARCHIVE.Dispose()
           }
 
-      - name: Attest Windows ML smoke-tool artifact
-        if: inputs.upload-artifacts && inputs.attest-artifacts
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
-
-      - name: Upload Windows ML smoke-tool artifact
-        if: inputs.upload-artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
-          archive: false
-          if-no-files-found: error
-
       - name: Configure OBS Studio (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
@@ -474,6 +460,20 @@ jobs:
             $hash = (Get-FileHash -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $name) -Algorithm SHA256).Hash.ToLowerInvariant()
             "$name sha256=$hash" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
           }
+
+      - name: Attest Windows ML smoke-tool artifact
+        if: inputs.upload-artifacts && inputs.attest-artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+
+      - name: Upload Windows ML smoke-tool artifact
+        if: inputs.upload-artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+          archive: false
+          if-no-files-found: error
 
       - name: Attest production session-check artifact
         if: inputs.upload-artifacts && inputs.attest-artifacts
