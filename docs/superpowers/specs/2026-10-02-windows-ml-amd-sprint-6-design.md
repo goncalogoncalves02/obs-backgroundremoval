@@ -7,7 +7,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 **Date:** 2026-10-02
 
-**Status:** Conversational design approved; written specification awaiting owner review.
+**Status:** Written specification approved by the owner on 2026-10-02 for implementation planning.
 
 ## Intent and baseline
 
