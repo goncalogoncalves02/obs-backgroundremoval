@@ -7,7 +7,9 @@ param(
     [Parameter(Mandatory)][string]$ObsBuildDirectory,
     [Parameter(Mandatory)][string]$ObsDepsPrefix,
     [Parameter(Mandatory)][string]$VcpkgInstalledPrefix,
-    [Parameter(Mandatory)][string]$TestDirectory
+    [Parameter(Mandatory)][string]$TestDirectory,
+    [Parameter(Mandatory)][string]$ObsSourceDirectory,
+    [Parameter(Mandatory)][string]$WindowsMlRoot
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -66,9 +68,13 @@ function Find-BuiltFile([string]$Root, [string]$Name) {
 $build = Require-SafeItem $ObsBuildDirectory $true
 $deps = Require-SafeItem (Join-Path (Require-SafeItem $ObsDepsPrefix $true) 'bin') $true
 $vcpkg = Require-SafeItem $VcpkgInstalledPrefix $true
+$obsSource = Require-SafeItem $ObsSourceDirectory $true
+$coreSource = Require-SafeItem (Join-Path $obsSource 'libobs/data') $true
+$winml = Require-SafeItem $WindowsMlRoot $true
+$native = Require-SafeItem (Join-Path $winml 'runtimes/win-x64/native') $true
 $destination = Require-SafeItem $TestDirectory $true
 $null = Find-File $destination 'gpu-image-processing-native.exe' $true
-foreach ($root in @($build, $deps, $vcpkg)) {
+foreach ($root in @($build, $deps, $vcpkg, $obsSource, $winml)) {
     $rootPath = [IO.Path]::TrimEndingDirectorySeparator($root)
     $destPath = [IO.Path]::TrimEndingDirectorySeparator($destination)
     $separator = [IO.Path]::DirectorySeparatorChar
@@ -107,9 +113,13 @@ $origins['libobs-d3d11.dll'] = $module
 $origins['obs.dll'] = Find-BuiltFile $build 'obs.dll'
 $origins['w32-pthreads.dll'] = Find-BuiltFile $build 'w32-pthreads.dll'
 foreach ($name in $closure) { $origins[$name] = Find-File $deps $name $true }
+# Already validated Windows ML 2.2.12 workflow package, exactly one ORT origin.
+foreach ($name in @('Microsoft.Windows.AI.MachineLearning.dll', 'onnxruntime.dll', 'DirectML.dll')) {
+    $origins[$name.ToLowerInvariant()] = Find-File $native $name $true
+}
 
 # CMake already stages direct libobs/OpenCV runtime imports. Prove every such DLL;
-# reject unexpected Windows ML/ORT or other runtimes rather than broaden the fixture.
+# prove the protected Windows ML closure and reject all other unexpected runtimes.
 foreach ($item in @(Get-ChildItem -LiteralPath $destination -Force -Filter '*.dll')) {
     $name = $item.Name.ToLowerInvariant()
     $null = Require-SafeItem $item.FullName $false
@@ -130,9 +140,55 @@ foreach ($name in @($origins.Keys | Sort-Object)) {
     if ($null -ne $existing -and (Get-Sha256 $existing) -cne $hash) {
         throw "Pre-staged DLL differs from its pinned origin: $name"
     }
-    $target = if ($null -ne $existing) { $existing } else { Join-Path $destination $name }
+    $target = if ($null -ne $existing) { $existing } else { Join-Path $destination ([IO.Path]::GetFileName($source)) }
     $deployment += [pscustomobject]@{ Name=$name; Source=$source; Destination=$target; Hash=$hash; Exists=($null -ne $existing) }
 }
+# Resolve each existing path component case-insensitively before any mutation.
+# This catches file/directory collisions and redirected intermediate directories.
+function Resolve-SafeDestination([string]$Relative, [bool]$Directory) {
+    $current = $destination
+    $parts = $Relative -split '[/\\]'
+    for ($index = 0; $index -lt $parts.Count; ++$index) {
+        $part = $parts[$index]
+        if ([string]::IsNullOrEmpty($part) -or $part -in @('.', '..')) { throw 'Unsafe staging relative path' }
+        if (Test-Path -LiteralPath $current) {
+            $matches = @(Get-ChildItem -LiteralPath $current -Force | Where-Object { $_.Name -ieq $part })
+            if ($matches.Count -gt 1) { throw "Duplicate core asset path component: $Relative" }
+            if ($matches.Count -eq 1) {
+                $isDirectory = $index -lt ($parts.Count - 1) -or $Directory
+                $current = Require-SafeItem $matches[0].FullName $isDirectory
+                continue
+            }
+        }
+        $current = Join-Path $current $part
+    }
+    return $current
+}
+
+# obs_reset_video requires these pinned libobs effects. Stage the complete exact
+# source data tree in the test fixture, never in plugin resources or the ZIP.
+foreach ($name in @('default.effect', 'opaque.effect', 'solid.effect', 'repeat.effect',
+                   'format_conversion.effect', 'bicubic_scale.effect', 'lanczos_scale.effect',
+                   'area.effect', 'bilinear_lowres_scale.effect', 'premultiplied_alpha.effect')) {
+    $null = Find-File $coreSource $name $true
+}
+$assetDeployment = @()
+$assetNames = @{}
+foreach ($item in @(Get-ChildItem -LiteralPath $coreSource -Recurse -Force)) {
+    $isDirectory = $item -is [IO.DirectoryInfo]
+    $source = Require-SafeItem $item.FullName $isDirectory
+    $relative = [IO.Path]::GetRelativePath($coreSource, $source)
+    if ($assetNames.ContainsKey($relative)) { throw "Duplicate case-insensitive core asset: $relative" }
+    $assetNames[$relative] = $true
+    $target = Resolve-SafeDestination (Join-Path 'obs-fixture/data/libobs' $relative) $isDirectory
+    if ($isDirectory) { continue }
+    $hash = Get-Sha256 $source
+    $exists = Test-Path -LiteralPath $target
+    if ($exists -and (Get-Sha256 $target) -cne $hash) { throw "Core asset differs from pinned OBS source: $relative" }
+    $assetDeployment += [pscustomobject]@{ Name=$relative; Source=$source; Destination=$target; Hash=$hash; Exists=$exists }
+}
+$workingDirectory = Resolve-SafeDestination 'obs-fixture/bin/64bit' $true
+
 # Complete preflight precedes copies. Never overwrite collisions.
 foreach ($entry in $deployment) {
     if (-not $entry.Exists) { [IO.File]::Copy($entry.Source, $entry.Destination, $false) }
@@ -141,3 +197,14 @@ foreach ($entry in $deployment) {
     }
     Write-Output "$($entry.Name) origin=$($entry.Source) sha256=$($entry.Hash)"
 }
+
+foreach ($entry in $assetDeployment) {
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($entry.Destination))
+    if (-not $entry.Exists) { [IO.File]::Copy($entry.Source, $entry.Destination, $false) }
+    if ((Get-Sha256 $entry.Source) -cne $entry.Hash -or (Get-Sha256 $entry.Destination) -cne $entry.Hash) {
+        throw "Core asset origin changed during staging: $($entry.Name)"
+    }
+    Write-Output "core-asset=$($entry.Name) origin=$($entry.Source) sha256=$($entry.Hash)"
+}
+$null = [IO.Directory]::CreateDirectory($workingDirectory)
+Write-Output "obs-fixture-working-directory=$workingDirectory"

@@ -443,10 +443,11 @@ jobs:
           ctest --test-dir build -C RelWithDebInfo -R '^gpu-image-(policy|pipeline)$' --output-on-failure --no-tests=error
           if ($LASTEXITCODE -ne 0) { throw 'GPU image policy/packet tests failed.' }
 
-      - name: Test GPU image native graphics (Windows)
+      - name: Test GPU image native graphics and filter lifecycle (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
           OBS_DEPS_PREFIX: ${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_PREFIX }}
+          WINDOWS_ML_PREFIX: ${{ steps.setup-buildspec-deps.outputs.WINDOWS_ML_PREFIX }}
           PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
         run: |
           $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
@@ -461,8 +462,10 @@ jobs:
             -ObsBuildDirectory (Join-Path $env:GITHUB_WORKSPACE 'build_obs') `
             -ObsDepsPrefix $env:OBS_DEPS_PREFIX `
             -VcpkgInstalledPrefix (Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed/$env:VCPKG_TARGET_TRIPLET") `
-            -TestDirectory (Join-Path $env:GITHUB_WORKSPACE 'build/tests/GpuImageProcessing')
-          ctest --test-dir build -C RelWithDebInfo -R '^(gpu-image-mask-reference|gpu-image-processing-native)$' --output-on-failure --no-tests=error --verbose --interactive-debug-mode 0
+            -TestDirectory (Join-Path $env:GITHUB_WORKSPACE 'build/tests/GpuImageProcessing') `
+            -ObsSourceDirectory (Join-Path $env:GITHUB_WORKSPACE 'vendor/obs-studio') `
+            -WindowsMlRoot $env:WINDOWS_ML_PREFIX
+          ctest --test-dir build -C RelWithDebInfo -R '^(gpu-image-mask-reference|gpu-image-processing-native|gpu-image-filter-lifecycle|gpu-image-status)$' --output-on-failure --no-tests=error --verbose --interactive-debug-mode 0
           if ($LASTEXITCODE -ne 0) { throw 'Native graphics tests failed; graphics deployment is a required gate.' }
 
       - name: Package dll artifact (Windows)

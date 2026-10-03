@@ -79,4 +79,47 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
       "${PROJECT_SOURCE_DIR}/data/models/mediapipe.onnx"
   )
   set_tests_properties(gpu-image-processing-native PROPERTIES TIMEOUT 300)
+
+  add_executable(
+    gpu-image-filter-lifecycle
+    filter-pipeline-test.cpp
+    filter-boundaries.cpp
+    "${PROJECT_SOURCE_DIR}/src/ort-utils/ort-session-utils.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/obs-utils.cpp"
+  )
+  # Only the model-resource path boundary is replaced. The included production
+  # filter TU, OBS, model/session adapter and graphics implementations execute.
+  set_source_files_properties(
+    "${PROJECT_SOURCE_DIR}/src/ort-utils/ort-session-utils.cpp"
+    PROPERTIES COMPILE_OPTIONS "/FI${CMAKE_CURRENT_SOURCE_DIR}/filter-boundaries.hpp"
+  )
+  target_include_directories(
+    gpu-image-filter-lifecycle
+    PRIVATE "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+  target_link_libraries(
+    gpu-image-filter-lifecycle
+    PRIVATE
+      BuildOptions
+      OBS::libobs
+      OnnxRuntimeBackend
+      windows-ml-session-core
+      OpenCV::opencv_core
+      OpenCV::opencv_imgproc
+  )
+  stage_windows_ml_runtime(gpu-image-filter-lifecycle)
+  add_executable(gpu-image-status status-test.cpp)
+  target_include_directories(gpu-image-status PRIVATE "${GPU_IMAGE_SOURCE_DIR}")
+  target_link_libraries(gpu-image-status PRIVATE BuildOptions OpenCV::opencv_core)
+  add_test(
+    NAME gpu-image-filter-lifecycle
+    COMMAND
+      gpu-image-filter-lifecycle --effect-root "${PROJECT_SOURCE_DIR}/data/effects" --model
+      "${PROJECT_SOURCE_DIR}/data/models/mediapipe.onnx"
+  )
+  add_test(NAME gpu-image-status COMMAND gpu-image-status)
+  set_tests_properties(
+    gpu-image-filter-lifecycle
+    PROPERTIES TIMEOUT 300 WORKING_DIRECTORY "$<TARGET_FILE_DIR:gpu-image-filter-lifecycle>/obs-fixture/bin/64bit"
+  )
 endif()
