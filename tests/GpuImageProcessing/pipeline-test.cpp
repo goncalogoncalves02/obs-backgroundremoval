@@ -43,7 +43,7 @@ static FramePacket frame(const PipelineConfig &config, uint64_t id = 1)
 
 static MaskPacket mask(const PipelineConfig &config, uint64_t id = 1)
 {
-	return {stamp(config, id), cv::Mat(720, 1280, CV_32FC1, cv::Scalar(0.25)), true};
+	return {stamp(config, id), cv::Mat(144, 256, CV_8UC1, cv::Scalar(63)), true};
 }
 
 // Dropping clone() at either publication or readback must fail this test, including externally owned staging memory.
@@ -72,11 +72,12 @@ static void packets_own_their_pixels()
 		"Reader frame mutations must not affect the mailbox");
 	auto output = mask(config);
 	require(pipeline.publish_mask(output), "Valid mask publication failed");
-	output.mask.setTo(0.75);
+	output.mask.setTo(191);
 	auto read_mask = pipeline.latest_mask();
-	require(read_mask && read_mask->mask.at<float>(0, 0) == 0.25f, "Published mask must not alias the producer");
-	read_mask->mask.setTo(0.5);
-	require(pipeline.latest_mask()->mask.at<float>(0, 0) == 0.25f,
+	require(read_mask && read_mask->mask.at<unsigned char>(0, 0) == 63,
+		"Published mask must not alias the producer");
+	read_mask->mask.setTo(127);
+	require(pipeline.latest_mask()->mask.at<unsigned char>(0, 0) == 63,
 		"Reader mask mutations must not affect the mailbox");
 }
 
@@ -119,15 +120,62 @@ static void late_status_cannot_overwrite_new_generation()
 		"Rejected status changed the processing snapshot");
 }
 
+static void processing_fallback_transitions_invalidate_the_route()
+{
+	ImagePipeline pipeline;
+	pipeline.configure(eligible_config());
+	auto config = pipeline.snapshot();
+	require(pipeline.publish_frame(frame(config)) && pipeline.publish_mask(mask(config)), "Publication failed");
+	require(pipeline.set_processing_state(config.generation, ProcessingState::Active, "ready"),
+		"Ready status rejected");
+	const auto active = pipeline.processing_snapshot();
+	require(active.generation == config.generation && active.preprocess_active && active.mask_active,
+		"Ordinary status completion must activate both stages without changing generation");
+	require(pipeline.set_processing_state(config.generation, ProcessingState::CpuProcessingFallback,
+					      "stage failed"),
+		"Processing fallback status rejected");
+	const auto fallback = pipeline.processing_snapshot();
+	require(fallback.requested && !fallback.preprocess_active && !fallback.mask_active &&
+			!fallback.similarity_full_readback,
+		"CPU image/mask fallback must leave both GPU stages inactive and retain saved preference");
+	require(fallback.generation > config.generation && !pipeline.latest_frame() && !pipeline.latest_mask(),
+		"Processing fallback transition must advance generation and clear incompatible history");
+	require(!pipeline.publish_frame(frame(config)) && !pipeline.publish_mask(mask(config)) &&
+			!pipeline.set_processing_state(config.generation, ProcessingState::Active, "late"),
+		"Old-route publications and statuses must not revive optimized processing");
+	const auto fallback_config = pipeline.snapshot();
+	require(fallback_config.effective_directml && fallback_config.requested,
+		"Image processing fallback must preserve completed DirectML inference and requested preference");
+	require(!pipeline.publish_frame(frame(fallback_config)) && !pipeline.publish_mask(mask(fallback_config)),
+		"GPU packets must not publish while the CPU image route is selected");
+	require(pipeline.configure(fallback_config) == fallback.generation,
+		"Unchanged configuration must preserve fallback generation");
+	require(pipeline.set_processing_state(fallback.generation, ProcessingState::CpuProcessingFallback,
+					      "still failed") &&
+			pipeline.snapshot().generation == fallback.generation,
+		"Unchanged fallback route must preserve generation");
+	require(pipeline.set_processing_state(fallback.generation, ProcessingState::Active, "recovered"),
+		"Current-generation recovery rejected");
+	const auto recovered = pipeline.snapshot();
+	require(recovered.generation > fallback.generation && !pipeline.latest_frame() && !pipeline.latest_mask(),
+		"Leaving CPU image fallback must start a fresh optimized route");
+	require(pipeline.publish_frame(frame(recovered)) && pipeline.publish_mask(mask(recovered)),
+		"Recovered route must accept fresh packets");
+	require(pipeline.set_processing_state(recovered.generation, ProcessingState::PreprocessOnly, "input ready") &&
+			pipeline.snapshot().generation == recovered.generation,
+		"Ordinary stage status changes must preserve current generation");
+}
+
 static void unchanged_configure_preserves_current_packets()
 {
 	ImagePipeline pipeline;
 	pipeline.configure(eligible_config());
 	auto config = pipeline.snapshot();
 	require(pipeline.publish_frame(frame(config)) && pipeline.publish_mask(mask(config)), "Publication failed");
+	const auto previous = config.generation;
 	config.generation = 999; // Caller-supplied generation cannot replace mailbox authority.
-	require(pipeline.configure(config) != 999 && pipeline.snapshot().generation < 999,
-		"Configure must assign its own generation");
+	require(pipeline.configure(config) == previous && pipeline.snapshot().generation == previous,
+		"Unchanged configure must preserve the exact authoritative generation");
 	require(pipeline.latest_frame() && pipeline.latest_mask(), "Unchanged configure cleared compatible packets");
 }
 
@@ -185,13 +233,47 @@ static void malformed_or_out_of_order_packets_cannot_replace_current()
 	bad_frame.input_bgra = cv::Mat(10, 10, CV_8UC4);
 	require(!pipeline.publish_frame(bad_frame), "Wrong actual input dimensions accepted");
 	auto bad_mask = mask(config, 6);
-	bad_mask.mask = cv::Mat(144, 256, CV_32FC1);
-	require(!pipeline.publish_mask(bad_mask), "Model-sized mask must not replace full source output");
-	bad_mask = mask(config, 6);
 	bad_mask.mask = cv::Mat(720, 1280, CV_8UC1);
-	require(!pipeline.publish_mask(bad_mask), "Wrong mask type accepted");
+	require(!pipeline.publish_mask(bad_mask), "GPU Stage2 must receive input-sized prepared pixels");
+	bad_mask = mask(config, 6);
+	bad_mask.mask = cv::Mat(144, 256, CV_32FC1);
+	require(!pipeline.publish_mask(bad_mask), "Float mask must not replace uint8 prepared pixels");
 	require(pipeline.latest_frame()->stamp.frame_id == 5 && pipeline.latest_mask()->stamp.frame_id == 5,
 		"Rejected publications changed current packets");
+}
+
+// GPU packets feed shader Stage2; legacy packets retain their existing threshold-dependent compositing size.
+static void mask_packet_dimensions_preserve_stage2_and_legacy_semantics()
+{
+	ImagePipeline pipeline;
+	auto config = eligible_config();
+	pipeline.configure(config);
+	config = pipeline.snapshot();
+	require(pipeline.publish_mask(mask(config)), "GPU prepared input-sized uint8 mask rejected");
+	auto legacy = mask(config, 2);
+	legacy.gpu_postprocess = false;
+	require(pipeline.publish_mask(legacy), "Threshold-disabled legacy input-sized uint8 mask rejected");
+	auto wrong = legacy;
+	wrong.stamp.frame_id = 3;
+	wrong.mask = cv::Mat(720, 1280, CV_8UC1);
+	require(!pipeline.publish_mask(wrong), "Threshold-disabled legacy source-sized mask accepted");
+	require(pipeline.latest_mask()->stamp.frame_id == 2 && !pipeline.latest_mask()->gpu_postprocess,
+		"Invalid legacy dimensions changed current packet");
+
+	config.mask.enable_threshold = true;
+	pipeline.configure(config);
+	config = pipeline.snapshot();
+	require(pipeline.publish_mask(mask(config)), "Threshold-enabled GPU prepared input-sized uint8 mask rejected");
+	legacy = mask(config, 2);
+	legacy.gpu_postprocess = false;
+	require(!pipeline.publish_mask(legacy), "Threshold-enabled legacy input-sized finished mask accepted");
+	legacy.mask = cv::Mat(720, 1280, CV_8UC1, cv::Scalar(63));
+	require(pipeline.publish_mask(legacy), "Threshold-enabled legacy source-sized uint8 mask rejected");
+	legacy.mask.setTo(191);
+	auto first = pipeline.latest_mask();
+	require(first && first->mask.at<unsigned char>(0, 0) == 63, "Legacy mask aliases producer buffer");
+	first->mask.setTo(127);
+	require(pipeline.latest_mask()->mask.at<unsigned char>(0, 0) == 63, "Legacy mask aliases reader buffer");
 }
 
 static void similarity_requires_full_readback()
@@ -265,9 +347,11 @@ int main()
 		packets_own_their_pixels();
 		stale_generation_or_dimensions_rejected();
 		late_status_cannot_overwrite_new_generation();
+		processing_fallback_transitions_invalidate_the_route();
 		unchanged_configure_preserves_current_packets();
 		relevant_changes_advance_generation();
 		malformed_or_out_of_order_packets_cannot_replace_current();
+		mask_packet_dimensions_preserve_stage2_and_legacy_semantics();
 		similarity_requires_full_readback();
 		invalidation_is_terminal_for_its_generation();
 		concurrent_publications_remain_owned_and_current();

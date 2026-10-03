@@ -306,6 +306,7 @@ target_sources(
 
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE windows-ml-session-core)
+  target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/obs-utils/gpu-image-policy.cpp src/obs-utils/gpu-image-pipeline.cpp)
 endif()
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTORCC ON)

@@ -50,7 +50,7 @@ All new contracts below live in namespace `gpu_image`:
 - `MaskSettings { bool enable_threshold; float threshold, temporal_smooth_factor, contour_filter, smooth_contour, feather; int mask_expansion; }` copies current meanings without new units.
 - `PipelineConfig { uint64_t generation; Dimensions source, input; bool requested, windows, mediapipe, session_ready, effective_directml, image_similarity; uint32_t mask_every_x_frames; double similarity_threshold; MaskSettings mask; }`.
 - `ProcessingDecision { bool eligible, small_readback, full_similarity_readback; }`; `ProcessingState { Off, Pending, PreprocessOnly, Active, Unavailable, CpuProcessingFallback }`.
-- `FramePacket { FrameStamp stamp; cv::Mat input_bgra, similarity_bgra; }` and `MaskPacket { FrameStamp stamp; cv::Mat mask; bool gpu_postprocess; }` own their data; publishing never retains a staging pointer or mutable caller buffer.
+- `FramePacket { FrameStamp stamp; cv::Mat input_bgra, similarity_bgra; }` and `MaskPacket { FrameStamp stamp; cv::Mat mask; bool gpu_postprocess; }` own their data; publishing never retains a staging pointer or mutable caller buffer. `MaskPacket.gpu_postprocess=true` carries an input-sized `CV_8UC1` prepared mask for shader Stage2; `false` carries the finished legacy `CV_8UC1` mask at source dimensions only when threshold is enabled, otherwise at input dimensions.
 - `ProcessingSnapshot { bool requested; ProcessingState state; uint64_t generation; Dimensions source, input; bool preprocess_active, mask_active, similarity_full_readback; std::string reason; }`. Session diagnostics remain the existing independent inference truth.
 
 ### Task 1: processing policy, generations and packet publication
