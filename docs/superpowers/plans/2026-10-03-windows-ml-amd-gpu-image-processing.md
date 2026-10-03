@@ -15,7 +15,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 **Spec:** [Approved GPU image-processing specification](../specs/2026-10-03-windows-ml-amd-gpu-image-processing-design.md).
 
-**Status:** Written plan awaiting owner review; no product implementation started. Preserve the approved task-scoped implementation/independent-review method.
+**Status:** Approved by the owner on 2026-10-03 (“Aprovo, podes avançar”). Implementation may proceed with the approved task-scoped implementer/independent-review method; hardware acceptance and measured CPU reduction remain separate gates.
 
 ## Global Constraints
 
@@ -149,4 +149,4 @@ Each task's implementer gets this plan, the approved spec, exact baseline and it
 
 Formatting/REUSE/whitespace checks cover each change. Existing native/session/package gates remain; broaden testing only for new regressions or touched contracts. Native graphics reference and final whole-change review precede artifact delivery. Signed identity, fingerprint, DCO, clean scoped worktree and protected refs are verified before every push.
 
-Written plan review is the next gate. The approved specification already selects task-scoped implementers and independent reviews, followed by whole-change review; preserve that execution method. After the owner confirms this plan, invoke `superpowers:subagent-driven-development` and start Task 1 in the existing worktree. Do not install new dependencies or write product code while this plan awaits review.
+The owner approved this written plan on 2026-10-03 (“Aprovo, podes avançar”). Use `superpowers:subagent-driven-development` and start Task 1 in the existing worktree, preserving task-scoped implementers and independent reviews followed by whole-change review. Product code is authorized within this scope; owner hardware results, merge and release are separate gates.
