@@ -200,10 +200,10 @@ int main()
 		fixed_expectations(legacy::prepare, legacy::finish);
 #if __has_include("background-mask-cpu.hpp")
 		fixed_expectations(prepare_small_mask, finish_mask_cpu);
+		return 0;
 #else
 		throw std::runtime_error("Task3 RED: missing background-mask-cpu.hpp helper implementation");
 #endif
-		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << "mask-reference FAIL: " << error.what() << std::endl;
 		return 1;
