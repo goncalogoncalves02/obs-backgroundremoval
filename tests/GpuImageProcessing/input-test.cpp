@@ -131,20 +131,43 @@ static void reference_case(Dimensions dimensions, bool similarity, const std::st
 			cv::norm(read_source(source.texture), input, cv::NORM_INF) == 0,
 		"Full source texture dimensions and pixels must be unchanged");
 	const auto saved = packet->input_bgra.clone();
+	const auto saved_similarity = packet->similarity_bgra.clone();
+	cv::Mat changed_input, changed_resized;
+	cv::bitwise_not(input, changed_input);
+	cv::resize(changed_input, changed_resized, cv::Size(256, 144), 0, 0, cv::INTER_LINEAR);
+	SourceTexture changed_source(changed_input);
 	const auto allocations = gpu_test::counts().allocations;
 	for (uint64_t id = 2; id <= 8; ++id) {
 		require(processor.prepare(config, effect.c_str()), "Repeated same-size prepare failed");
-		require(processor.capture(source.texture, {config.generation, id, dimensions, config.input}, similarity)
-				.has_value(),
-			"Repeated capture failed");
+		auto changed_packet = processor.capture(changed_source.texture,
+							{config.generation, id, dimensions, config.input}, similarity);
+		require(changed_packet.has_value(), "Repeated changed-pixel capture failed");
+		require(cv::norm(changed_resized, changed_packet->input_bgra, cv::NORM_L1) /
+					static_cast<double>(changed_resized.total() * 4 * 255) <=
+				0.01,
+			"Later captures must contain the changed source pixels");
+		require(cv::norm(saved, changed_packet->input_bgra, cv::NORM_INF) > 0,
+			"Ownership fixture must overwrite staging with visibly different input pixels");
+		if (similarity)
+			require(changed_packet->similarity_bgra.size() == changed_input.size() &&
+					cv::norm(changed_packet->similarity_bgra, changed_input, cv::NORM_INF) == 0,
+				"Later similarity captures must contain the changed full source pixels");
 	}
 	require(gpu_test::counts().allocations == allocations,
 		"Fixed-size capture/prepare must not reallocate GS resources");
 	require(gpu_test::counts().maps == gpu_test::counts().unmaps, "All successful maps must be unmapped");
 	require(cv::norm(saved, packet->input_bgra, cv::NORM_INF) == 0,
-		"Packet pixels must outlive staging unmap and subsequent captures");
+		"Original packet input pixels must survive changed captures and staging unmap");
+	if (similarity)
+		require(cv::norm(saved_similarity, packet->similarity_bgra, cv::NORM_INF) == 0,
+			"Original full similarity pixels must survive changed captures and staging unmap");
 	processor.release();
 	processor.release();
+	require(cv::norm(saved, packet->input_bgra, cv::NORM_INF) == 0,
+		"Original packet input pixels must outlive resource release");
+	if (similarity)
+		require(cv::norm(saved_similarity, packet->similarity_bgra, cv::NORM_INF) == 0,
+			"Original full similarity pixels must outlive resource release");
 }
 
 static void resource_failure_is_controlled(const std::string &effect)
