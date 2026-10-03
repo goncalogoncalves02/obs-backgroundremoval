@@ -460,7 +460,7 @@ jobs:
           ./tests/GpuImageProcessing/stage-graphics-runtime.ps1 `
             -ObsBuildDirectory (Join-Path $env:GITHUB_WORKSPACE 'build_obs') `
             -ObsDepsPrefix $env:OBS_DEPS_PREFIX `
-            -VcpkgBinDirectory (Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed/$env:VCPKG_TARGET_TRIPLET/bin") `
+            -VcpkgInstalledPrefix (Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed/$env:VCPKG_TARGET_TRIPLET") `
             -TestDirectory (Join-Path $env:GITHUB_WORKSPACE 'build/tests/GpuImageProcessing')
           ctest --test-dir build -C RelWithDebInfo -R '^gpu-image-processing-native$' --output-on-failure --no-tests=error --verbose --interactive-debug-mode 0
           if ($LASTEXITCODE -ne 0) { throw 'Native graphics tests failed; graphics deployment is a required gate.' }

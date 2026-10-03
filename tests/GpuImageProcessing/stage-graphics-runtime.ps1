@@ -6,7 +6,7 @@
 param(
     [Parameter(Mandatory)][string]$ObsBuildDirectory,
     [Parameter(Mandatory)][string]$ObsDepsPrefix,
-    [Parameter(Mandatory)][string]$VcpkgBinDirectory,
+    [Parameter(Mandatory)][string]$VcpkgInstalledPrefix,
     [Parameter(Mandatory)][string]$TestDirectory
 )
 Set-StrictMode -Version Latest
@@ -65,7 +65,7 @@ function Find-BuiltFile([string]$Root, [string]$Name) {
 
 $build = Require-SafeItem $ObsBuildDirectory $true
 $deps = Require-SafeItem (Join-Path (Require-SafeItem $ObsDepsPrefix $true) 'bin') $true
-$vcpkg = Require-SafeItem $VcpkgBinDirectory $true
+$vcpkg = Require-SafeItem $VcpkgInstalledPrefix $true
 $destination = Require-SafeItem $TestDirectory $true
 $null = Find-File $destination 'gpu-image-processing-native.exe' $true
 foreach ($root in @($build, $deps, $vcpkg)) {
@@ -117,7 +117,9 @@ foreach ($item in @(Get-ChildItem -LiteralPath $destination -Force -Filter '*.dl
         if ($name -notmatch '^opencv_(core|imgproc)[0-9]+\.dll$') {
             throw "Unexpected pre-staged graphics runtime: $name"
         }
-        $origins[$name] = Find-File $vcpkg $name $true
+        # Static triplets legitimately have no bin. Require/prove it only for actual DLL imports.
+        $vcpkgBin = Require-SafeItem (Join-Path $vcpkg 'bin') $true
+        $origins[$name] = Find-File $vcpkgBin $name $true
     }
 }
 $deployment = @()

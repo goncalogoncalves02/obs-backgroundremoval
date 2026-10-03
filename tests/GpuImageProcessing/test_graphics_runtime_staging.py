@@ -27,7 +27,8 @@ class GraphicsRuntimeStaging(unittest.TestCase):
         self.build = self.root / 'build obs'
         self.deps = self.root / 'OBS deps'
         self.bin = self.deps / 'bin'
-        self.vcpkg = self.root / 'vcpkg bin'
+        self.vcpkg_prefix = self.root / 'vcpkg prefix'
+        self.vcpkg = self.vcpkg_prefix / 'bin'
         self.dest = self.root / 'native test'
         for p in (self.build, self.bin, self.vcpkg, self.dest):
             p.mkdir(parents=True)
@@ -47,7 +48,7 @@ class GraphicsRuntimeStaging(unittest.TestCase):
 Write-Output 'graphics-staging-fixture-start'
 $global:FixtureImports = $Imports
 function dumpbin { $global:LASTEXITCODE = 0; Get-Content -LiteralPath $global:FixtureImports }
-& $Script -ObsBuildDirectory $BuildRoot -ObsDepsPrefix $DepsRoot -VcpkgBinDirectory $VcpkgRoot -TestDirectory $DestRoot
+& $Script -ObsBuildDirectory $BuildRoot -ObsDepsPrefix $DepsRoot -VcpkgInstalledPrefix $VcpkgRoot -TestDirectory $DestRoot
 ''')
 
     def snapshot(self):
@@ -57,7 +58,7 @@ function dumpbin { $global:LASTEXITCODE = 0; Get-Content -LiteralPath $global:Fi
         return subprocess.run([
             self.pwsh, '-NoProfile', '-NonInteractive', '-File', str(self.wrapper),
             str(ROOT / 'tests/GpuImageProcessing/stage-graphics-runtime.ps1'),
-            str(self.build), str(self.deps), str(self.vcpkg), str(self.dest), str(self.imports),
+            str(self.build), str(self.deps), str(self.vcpkg_prefix), str(self.dest), str(self.imports),
         ], capture_output=True, text=True, timeout=30)
 
     def reject(self):
@@ -77,6 +78,26 @@ function dumpbin { $global:LASTEXITCODE = 0; Get-Content -LiteralPath $global:Fi
                 self.assertEqual((self.dest / name).read_bytes(), (self.bin / name).read_bytes())
             self.assertEqual(len(self.snapshot()), 14)
             self.assertIn('origin=', result.stdout)
+
+    def test_static_triplet_without_bin_is_supported(self):
+        (self.dest / 'opencv_core411.dll').unlink()
+        (self.vcpkg / 'opencv_core411.dll').unlink()
+        self.vcpkg.rmdir()
+        result = self.stage()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.vcpkg.exists(), 'Staging must not invent a missing dynamic bin')
+        self.assertEqual(len(self.snapshot()), 13)
+
+    def test_missing_vcpkg_installed_prefix_fails_before_copies(self):
+        (self.vcpkg / 'opencv_core411.dll').unlink()
+        self.vcpkg.rmdir()
+        self.vcpkg_prefix.rmdir()
+        self.reject()
+
+    def test_dynamic_opencv_without_bin_fails_before_copies(self):
+        (self.vcpkg / 'opencv_core411.dll').unlink()
+        self.vcpkg.rmdir()
+        self.reject()
 
     def test_conflicting_destination_fails_preflight(self):
         (self.dest / 'ZLIB.DLL').write_bytes(b'other origin')
