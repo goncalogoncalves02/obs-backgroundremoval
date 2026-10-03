@@ -13,7 +13,7 @@ This document is the durable entry point for continuing the Windows ML AMD work.
 ## Current repository and branch state
 
 - Repository: `goncalogoncalves02/obs-backgroundremoval`.
-- Durable documentation branch: `GPU`; before this delivery-handoff documentation update its head was `c10f53d2cbd12b3543d64ae07cfe7a0100c3e90f`.
+- Durable documentation branch: `GPU`; before this owner-acceptance documentation update its head was `f9bbf21c8a74285aa36151e0fb140b48cc207ba2`.
 - Accepted Sprint 6 implementation: `feature/windows-ml-amd-sprint-6`, source `a390fcb4f2f6cdd9beba14e3024edc41b7860cc0`.
 - [PR #2](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/2) remains open and draft, with `windows-only-ci` and `upload-artifacts` at this snapshot.
 - Production-core hardware evidence uses `5f1b52fcb521825014e5dff5d5289ee82a8c66e4`; the later accepted source adds the bounded CPU/DirectML selector/status and Portuguese locale packaging without changing that backend.
@@ -21,9 +21,11 @@ This document is the durable entry point for continuing the Windows ML AMD work.
 - `main` remains `9772c540279cc84b8c5be5442c50ccb00b399a6e` and has not received either feature. No merge, public release or deployment is recorded.
 - This `GPU` change contains documentation only. Preserve the owner's untracked files, including `.aws`; do not inspect, stage, rewrite or delete them.
 
-## GPU image processing delivery — owner acceptance pending
+## GPU image processing delivery and owner acceptance
 
-The owner approved the two-stage Windows + MediaPipe + DirectML design and implementation plan on 2026-10-03. The software implementation and controlled comparison delivery are now verified; the owner's new visual/lifecycle and whole-OBS CPU result have not yet been collected. This extends the accepted inference route with GPU input downscaling and GPU mask resizing/smoothing/expansion/feather. Initial contours remain on the small CPU mask; direct OBS–DirectML memory sharing is deferred. Image Similarity enabled still requires full-size CPU readback.
+The owner approved the two-stage Windows + MediaPipe + DirectML design and implementation plan on 2026-10-03. The software implementation and controlled comparison delivery are verified, and the owner has now supplied the real OBS visual/lifecycle and whole-OBS CPU result. This extends the accepted inference route with GPU input downscaling and GPU mask resizing/smoothing/expansion/feather. Initial contours remain on the small CPU mask; direct OBS–DirectML memory sharing is deferred. Image Similarity enabled still requires full-size CPU readback.
+
+The [sanitized owner acceptance record](windows-ml-gpu-image-processing-acceptance.md) reports all four valid OFF → ON → ON → OFF blocks with effective DirectML: mean process CPU **7.744624% OFF → 1.683161% ON**, a **6.061463 percentage-point / 78.266721% relative reduction**, with Image Similarity OFF. Mask/hair/movement, switching, resize and filter recreation were explicitly accepted without a crash. This is a sequential observation on the owner's RX 9070 XT scene, without statistical confidence or a general livestream performance guarantee. After the test the owner separately observed CPU rise with Image Similarity enabled; that unquantified observation is consistent with its retained full-size CPU readback/comparison and is not part of the measured reduction.
 
 - Feature branch: `feature/windows-ml-amd-gpu-image-processing`.
 - Final signed source: `8da27a2557c3b89854f48df702888c94557c720d`.
@@ -38,7 +40,7 @@ Deliver exactly one [reviewed handoff ZIP](https://github.com/goncalogoncalves02
 
 Close OBS and run the extracted installer in administrator PowerShell. It preserves the actual previous tree and receipt outside OBS search paths; `-Acao Restaurar` restores that prior version. Reopen OBS with MediaPipe + GPU DirectML, then run the extracted comparison script. The saved GPU image-processing checkbox defaults OFF; OFF and ON both retain DirectML inference. The script guides OFF → ON → ON → OFF, with 5 seconds settling and 15 seconds actual process-CPU measurement per block, plus bounded post-end log observation separately disclosed. CPU reads use actual acquisition timestamps and logical-processor normalization; late/slow reads, missing closing logs, fallback, changed settings/source/process or incomplete records make the comparison inconclusive. Host timing and OBS telemetry intervals are disclosed separately; unavailable network-drop counters are not invented. No statistically established or substantial saving is promised.
 
-Next action: collect only the owner's sanitized terminal summary and separate visual/motion/lifecycle answers. Keep complete logs local. Record acceptance and measured performance only after those real results exist; the acceptance document remains pending. This delivery handoff is documentation only on `GPU`, with no feature code copied, merge, release, or owner installation performed here.
+Owner comparison and visual/motion/lifecycle acceptance are now recorded; keep complete logs local. The tested usage configuration is MediaPipe + GPU DirectML, GPU image processing ON, Image Similarity OFF. Further similarity optimization needs a separately agreed scope. This handoff and acceptance update are documentation only on `GPU`, with no feature code copied, merge, release, or owner installation performed here. Native Linux/macOS, explicit eligible DirectML allocation-failure testing and long-duration streaming remain separate verification limits.
 
 ## Current acceptance and scope
 
@@ -224,7 +226,7 @@ Only the sanitized plugin lines and necessary hardware/version facts are retaine
 
 ## Next session and remaining gates
 
-1. Reconcile `AGENTS.md`, this handoff, the current GPU image-processing ledger, worktrees and diffs. Preserve owner files, accepted Sprint 5/Sprint 6 heads and the final image-processing source; collect the pending owner comparison summary rather than restarting completed implementation or historical hardware checks.
+1. Reconcile `AGENTS.md`, this handoff, the current GPU image-processing ledger, worktrees and diffs. Preserve owner files, accepted Sprint 5/Sprint 6 heads and the accepted image-processing source/results; do not restart completed implementation or historical hardware checks.
 2. Verify the signed documentation-only `GPU` publication/readback, live branch heads, PR draft state, exact-SHA CI and artifact availability. Artifact retention is finite.
 3. Continue using MediaPipe with DirectML or CPU on the accepted setup. Consult the immutable UI usage guide and integration record when diagnosing effective-provider status; MIGraphX remains optional without a selector.
 4. Obtain new owner direction and any required design approval before implementing the next sprint or expanding UI/models. This acceptance does not authorize merge, public release or deployment.
