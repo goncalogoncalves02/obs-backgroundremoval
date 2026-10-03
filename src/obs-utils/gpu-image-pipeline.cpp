@@ -53,20 +53,24 @@ PipelineConfig ImagePipeline::snapshot() const
 
 bool ImagePipeline::publish_frame(FramePacket packet)
 {
-	try {
-		packet.input_bgra = packet.input_bgra.clone();
-		packet.similarity_bgra = packet.similarity_bgra.clone();
-	} catch (const cv::Exception &) {
-		return false;
-	} catch (const std::bad_alloc &) {
-		return false;
+	const auto acceptable = [&] {
+		return valid_ && state_ != ProcessingState::CpuProcessingFallback &&
+		       accept_frame(packet.stamp, config_) &&
+		       (!frame_ || packet.stamp.frame_id > frame_->stamp.frame_id) &&
+		       matches_image(packet.input_bgra, config_.input, CV_8UC4) &&
+		       (!config_.image_similarity || matches_image(packet.similarity_bgra, config_.source, CV_8UC4)) &&
+		       (packet.similarity_bgra.empty() ||
+			matches_image(packet.similarity_bgra, config_.source, CV_8UC4));
+	};
+	{
+		std::lock_guard lock(mutex_);
+		if (!acceptable())
+			return false;
 	}
+	packet.input_bgra = packet.input_bgra.clone();
+	packet.similarity_bgra = packet.similarity_bgra.clone();
 	std::lock_guard lock(mutex_);
-	if (!valid_ || state_ == ProcessingState::CpuProcessingFallback || !accept_frame(packet.stamp, config_) ||
-	    (frame_ && packet.stamp.frame_id <= frame_->stamp.frame_id) ||
-	    !matches_image(packet.input_bgra, config_.input, CV_8UC4) ||
-	    (config_.image_similarity && !matches_image(packet.similarity_bgra, config_.source, CV_8UC4)) ||
-	    (!packet.similarity_bgra.empty() && !matches_image(packet.similarity_bgra, config_.source, CV_8UC4)))
+	if (!acceptable())
 		return false;
 	frame_ = std::move(packet);
 	return true;
@@ -88,18 +92,22 @@ std::optional<FramePacket> ImagePipeline::latest_frame() const
 
 bool ImagePipeline::publish_mask(MaskPacket packet)
 {
-	try {
-		packet.mask = packet.mask.clone();
-	} catch (const cv::Exception &) {
-		return false;
-	} catch (const std::bad_alloc &) {
-		return false;
+	const auto acceptable = [&] {
+		const Dimensions expected = packet.gpu_postprocess || !config_.mask.enable_threshold ? config_.input
+												     : config_.source;
+		return valid_ && state_ != ProcessingState::CpuProcessingFallback &&
+		       accept_frame(packet.stamp, config_) &&
+		       (!mask_ || packet.stamp.frame_id > mask_->stamp.frame_id) &&
+		       matches_image(packet.mask, expected, CV_8UC1);
+	};
+	{
+		std::lock_guard lock(mutex_);
+		if (!acceptable())
+			return false;
 	}
+	packet.mask = packet.mask.clone();
 	std::lock_guard lock(mutex_);
-	const Dimensions expected = packet.gpu_postprocess || !config_.mask.enable_threshold ? config_.input
-											     : config_.source;
-	if (!valid_ || state_ == ProcessingState::CpuProcessingFallback || !accept_frame(packet.stamp, config_) ||
-	    (mask_ && packet.stamp.frame_id <= mask_->stamp.frame_id) || !matches_image(packet.mask, expected, CV_8UC1))
+	if (!acceptable())
 		return false;
 	mask_ = std::move(packet);
 	return true;

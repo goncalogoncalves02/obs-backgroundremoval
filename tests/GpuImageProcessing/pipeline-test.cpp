@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "gpu-image-pipeline.hpp"
+#include "mat-allocation-fault.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -341,9 +342,74 @@ static void concurrent_publications_remain_owned_and_current()
 		"Concurrent reader mutated published pixels");
 }
 
+// Allocation failure must be distinguishable from an ordinary stale/malformed rejection.
+static void allocation_failure_is_not_authority_rejection()
+{
+	ImagePipeline pipeline;
+	pipeline.configure(eligible_config());
+	const auto config = pipeline.snapshot();
+	auto input = frame(config), next_input = frame(config, 2);
+	auto output = mask(config), next_output = mask(config, 2);
+	require(pipeline.publish_frame(input) && pipeline.publish_mask(output), "Initial packets missing");
+	for (int operation = 0; operation < 4; ++operation) {
+		bool failed = false;
+		{
+			gpu_test::MatAllocationScope allocation_failure;
+			try {
+				if (operation == 0)
+					pipeline.publish_frame(next_input);
+				if (operation == 1)
+					pipeline.publish_mask(next_output);
+				if (operation == 2)
+					pipeline.latest_frame();
+				if (operation == 3)
+					pipeline.latest_mask();
+			} catch (const std::bad_alloc &) {
+				failed = true;
+			} catch (const cv::Exception &) {
+				failed = true;
+			}
+		}
+		require(failed, "Clone allocation failure was disguised as authority rejection");
+		require(pipeline.latest_frame()->stamp.frame_id == 1 && pipeline.latest_mask()->stamp.frame_id == 1,
+			"Failed clone changed the previously owned mailbox");
+	}
+	{
+		gpu_test::MatAllocationScope allocation_failure;
+		require(!pipeline.publish_frame(input) && !pipeline.publish_mask(output),
+			"Ordinary duplicate rejection unexpectedly changed classification");
+		require(gpu_test::MatAllocationFault::allocations == 0,
+			"Rejected packets allocated before authority validation");
+	}
+	for (int operation = 0; operation < 2; ++operation) {
+		pipeline.configure(eligible_config());
+		const auto before = pipeline.snapshot();
+		auto pending_frame = frame(before, 4);
+		auto pending_mask = mask(before, 4);
+		gpu_test::MatAllocationScope observe(-1);
+		gpu_test::MatAllocationFault::before_allocate = [&] {
+			auto changed = before;
+			changed.source = {1920, 1080};
+			pipeline.configure(changed);
+		};
+		require(!(operation == 0 ? pipeline.publish_frame(pending_frame) : pipeline.publish_mask(pending_mask)),
+			"Publication accepted a packet invalidated while its clone allocated");
+		require(!pipeline.latest_frame() && !pipeline.latest_mask(),
+			"Late clone restored stale mailbox storage");
+	}
+	{
+		gpu_test::MatAllocationScope allocation_failure;
+		require(!pipeline.publish_frame(input) && !pipeline.publish_mask(output),
+			"Old-generation packets tried allocation instead of being rejected");
+		require(gpu_test::MatAllocationFault::allocations == 0, "Obsolete publications allocated storage");
+	}
+	std::cout << "Actual OpenCV clone allocation failure classification PASS\n";
+}
+
 int main()
 {
 	try {
+		allocation_failure_is_not_authority_rejection();
 		packets_own_their_pixels();
 		stale_generation_or_dimensions_rejected();
 		late_status_cannot_overwrite_new_generation();

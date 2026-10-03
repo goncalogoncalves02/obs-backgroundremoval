@@ -2,12 +2,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "filter-boundaries.hpp"
-// Execute the actual callback TU and inspect its existing owned lifetime/model.
-// No production hooks, fabricated sessions or graphics replacements are added.
-#include "background-filter.cpp"
-#include "obs-utils/background-mask-cpu.hpp"
 #include "graphics-fault-controls.hpp"
+#include "mat-allocation-fault.hpp"
 #include <functional>
+#include <utility>
+namespace display_copy_fault {
+thread_local std::function<void()> after_copy;
+void copy(gs_texture_t *target, gs_texture_t *source)
+{
+	gs_copy_texture(target, source);
+	if (auto callback = std::exchange(after_copy, {}))
+		callback();
+}
+} // namespace display_copy_fault
+// Execute the actual callback TU and inspect its existing owned lifetime/model.
+// Count actual production display-cache allocations too; wrappers delegate to real graphics.
+#define gs_copy_texture display_copy_fault::copy
+#define gs_texture_create gpu_test_texture_create
+#define gs_texture_destroy gpu_test_texture_destroy
+#include "background-filter.cpp"
+#undef gs_copy_texture
+#undef gs_texture_create
+#undef gs_texture_destroy
+#include "obs-utils/background-mask-cpu.hpp"
 #include <map>
 #include <atomic>
 #include <chrono>
@@ -372,6 +389,38 @@ void draw(obs_source_t *source)
 	gs_texrender_destroy(output);
 	check(!static_cast<SourceFixture *>(obs_obj_get_data(source))->failed, "Actual fixture source callback failed");
 }
+void require_checkbox_enabled(obs_source_t *filter, bool enabled)
+{
+	auto *properties = filter ? obs_source_properties(filter) : background_filter_properties(nullptr);
+	check(properties != nullptr, "Properties unavailable for eligibility assertion");
+	auto *checkbox = obs_properties_get(properties, "gpu_image_processing");
+	const bool matches = checkbox && obs_property_enabled(checkbox) == enabled;
+	obs_properties_destroy(properties);
+	check(matches, "Processing checkbox enablement differs from completed-session eligibility");
+}
+void require_display_reuse(obs_source_t *filter, obs_source_t *source,
+			   const std::shared_ptr<background_removal_filter> &tf)
+{
+	// Warm both owned slots, then count actual filter TU and helper allocations at fixed dimensions.
+	process_frame(filter, source);
+	process_frame(filter, source);
+	process_frame(filter, source);
+	unsigned before = 0;
+	on_obs_thread([&] { before = gpu_test::counts().allocations; });
+	for (unsigned i = 0; i < 3; ++i)
+		process_frame(filter, source);
+	on_obs_thread([&] {
+		draw(source); // Display the just-published mask before tick can consume a wrongly queued refresh.
+		check(gpu_test::counts().allocations == before,
+		      "Steady-state actual filter display allocated a texture for each mask");
+		GraphicsScope graphics;
+		check(tf->imageDisplayTexture != nullptr, "Persistent accepted display missing");
+		// A pending property refresh from the first Active transition is consumed by tick.
+		if (tf->imagePipeline.processing_snapshot().mask_active)
+			check(!tf->refreshImageProperties,
+			      "Steady-state Active mask queued another properties refresh");
+	});
+}
 void require_checkbox(obs_source_t *filter, obs_data_t *settings)
 {
 	obs_properties_t *properties = obs_source_properties(filter);
@@ -505,6 +554,130 @@ void require_telemetry(const std::shared_ptr<background_removal_filter> &tf)
 	      "Telemetry FPS/OBS availability differs from actual fixture");
 	std::cout << "filter-telemetry real-five-second version=1 parsed-FPS/counters/fingerprints PASS" << std::endl;
 }
+void require_mailbox_failure_recovery(obs_source_t *filter, obs_source_t *source, obs_data_t *settings,
+				      const std::shared_ptr<background_removal_filter> &tf)
+{
+	const char *reasons[] = {"input-publication-failed", "mask-publication-failed", "input-packet-read-failed",
+				 "mask-packet-read-failed"};
+	for (unsigned operation = 0; operation < 4; ++operation) {
+		obs_data_set_int(settings, "numThreads", 4 + operation);
+		background_filter_update(obs_obj_get_data(filter), settings);
+		process_frame(filter, source);
+		process_frame(filter, source);
+		cv::Mat accepted;
+		Ort::Session *session = tf->session.get();
+		on_obs_thread([&] {
+			GraphicsScope graphics;
+			check(tf->imagePipeline.processing_snapshot().mask_active,
+			      "Actual eligible mask never became Active");
+			accepted = display_pixels(tf->imageDisplayTexture);
+		});
+		unsigned cloneAllocations = 0;
+		if (operation < 2) {
+			// Observe the real allocation sequence for the identical callback route, then fail its final
+			// byte-packet allocation. The asserted reason pins publication, not earlier preparation.
+			on_obs_thread([&] {
+				if (operation == 0) {
+					gpu_test::MatAllocationScope count(-1, CV_8UC4);
+					GraphicsScope graphics;
+					uint32_t width, height;
+					ImageRenderSettings render;
+					check(image_capture(tf, width, height, render), "Capture counting failed");
+					cloneAllocations = gpu_test::MatAllocationFault::allocations;
+				} else {
+					draw(source);
+					gpu_test::MatAllocationScope count(-1, CV_8UC1);
+					image_tick(tf);
+					cloneAllocations = gpu_test::MatAllocationFault::allocations;
+				}
+			});
+			check(cloneAllocations > 0, "No real publication allocation observed");
+		}
+		on_obs_thread([&] {
+			if (operation == 1 || operation == 2)
+				draw(source);
+			// Refresh the exact accepted pixels after any counting/warmup rendering.
+			{
+				GraphicsScope graphics;
+				accepted = display_pixels(tf->imageDisplayTexture);
+			}
+			{
+				gpu_test::MatAllocationScope failure(
+					operation < 2 ? static_cast<int>(cloneAllocations - 1) : 0,
+					operation == 0 || operation == 2 ? CV_8UC4 : CV_8UC1);
+				if (operation == 0) {
+					GraphicsScope graphics;
+					uint32_t width, height;
+					ImageRenderSettings render;
+					check(image_capture(tf, width, height, render),
+					      "Publication failure aborted source render");
+				} else if (operation == 1 || operation == 2) {
+					image_tick(tf);
+				} else {
+					GraphicsScope graphics;
+					check(image_display(tf) == tf->imageDisplayTexture,
+					      "Mask clone failure exposed source instead of accepted display");
+				}
+			}
+			GraphicsScope graphics;
+			check(cv::norm(accepted, display_pixels(tf->imageDisplayTexture), cv::NORM_INF) == 0,
+			      "Mailbox allocation failure overwrote accepted display pixels");
+			const auto failed = tf->imagePipeline.processing_snapshot();
+			check(failed.state == gpu_image::ProcessingState::CpuProcessingFallback && failed.requested &&
+				      !failed.preprocess_active && !failed.mask_active &&
+				      failed.reason == reasons[operation] &&
+				      tf->imageEffectiveProvider == "DmlExecutionProvider" &&
+				      tf->session.get() == session,
+			      "Mailbox allocation failure did not latch truthful processing-only fallback");
+			const auto generation = failed.generation;
+			// Retry the reader under another clone fault. Fallback no longer consults the GPU mailbox.
+			{
+				gpu_test::MatAllocationScope failure;
+				check(image_display(tf) == tf->imageDisplayTexture,
+				      "Latched failure retried mailbox clone");
+			}
+			check(tf->imagePipeline.snapshot().generation == generation,
+			      "Latched failure repeated transition");
+		});
+		process_frame(filter, source);
+		check(tf->imagePipeline.processing_snapshot().state ==
+			      gpu_image::ProcessingState::CpuProcessingFallback,
+		      "Next callback retried failed GPU processing");
+	}
+	obs_data_set_int(settings, "numThreads", 8);
+	background_filter_update(obs_obj_get_data(filter), settings);
+	process_frame(filter, source);
+	process_frame(filter, source);
+	on_obs_thread([&] {
+		GraphicsScope graphics;
+		const auto config = tf->imagePipeline.snapshot();
+		const auto accepted = display_pixels(tf->imageDisplayTexture);
+		auto *acceptedTexture = tf->imageDisplayTexture;
+		// Synthetic opposite mask isolates display ownership; session/provider diagnostics are untouched.
+		const auto opposite = accepted.at<cv::Vec4b>(0, 0)[0] < 128 ? 255 : 0;
+		gpu_image::MaskPacket replacement{
+			{config.generation, tf->imageFrameId + 1, config.source, config.input},
+			cv::Mat(static_cast<int>(config.input.height), static_cast<int>(config.input.width), CV_8UC1,
+				cv::Scalar(opposite)),
+			true};
+		check(tf->imagePipeline.publish_mask(replacement), "Current opposite test mask rejected");
+		display_copy_fault::after_copy = [&] {
+			image_fail(*tf, config.generation, "copy-became-obsolete");
+		};
+		check(image_display(tf) == acceptedTexture && !display_copy_fault::after_copy,
+		      "Obsolete candidate replaced accepted recovery display");
+		check(cv::norm(accepted, display_pixels(acceptedTexture), cv::NORM_INF) == 0,
+		      "Copy wrote over accepted pixels before generation validation");
+		check(cv::norm(accepted, display_pixels(tf->imageCandidateTexture), cv::NORM_INF) > 0,
+		      "Obsolete-candidate regression did not exercise different pixels");
+	});
+	// Restore by an explicit, real session initialization for subsequent helper fault cases.
+	obs_data_set_int(settings, "numThreads", 1);
+	background_filter_update(obs_obj_get_data(filter), settings);
+	process_frame(filter, source);
+	process_frame(filter, source);
+	std::cout << "filter-mailbox real-allocation-fault/publication/read/cache/latch PASS" << std::endl;
+}
 void semantic_cases(obs_source_t *filter, obs_source_t *source, obs_data_t *settings,
 		    const std::shared_ptr<background_removal_filter> &tf)
 {
@@ -633,6 +806,8 @@ void semantic_cases(obs_source_t *filter, obs_source_t *source, obs_data_t *sett
 		background_filter_update(obs_obj_get_data(filter), settings);
 		process_frame(filter, source);
 		process_frame(filter, source);
+		require_display_reuse(filter, source, tf);
+		require_mailbox_failure_recovery(filter, source, settings, tf);
 		cv::Mat acceptedDisplay;
 		on_obs_thread([&] {
 			GraphicsScope graphics;
@@ -794,6 +969,9 @@ void run_lifetimes()
 			std::cout << "filter-baseline actual-filter-render=completed actual-CPU-inference=completed"
 				  << std::endl;
 			require_checkbox(filter, settings);
+			require_checkbox_enabled(nullptr, false);
+			require_checkbox_enabled(filter, false);
+			require_display_reuse(filter, source, tf);
 			// Attempt the actual provider route; never overwrite SessionDiagnostics.
 			obs_data_set_string(settings, "useGPU", USEGPU_WINML_DIRECTML);
 			background_filter_update(obs_obj_get_data(filter), settings);
@@ -811,6 +989,8 @@ void run_lifetimes()
 						<< "filter-eligible-GPU coverage=hardware-pending reason=actual-provider-unavailable"
 						<< std::endl;
 			}
+			require_checkbox_enabled(filter,
+						 tf->sessionDiagnostics.effective_provider == "DmlExecutionProvider");
 			if (cycle == 0)
 				semantic_cases(filter, source, settings, tf);
 			// Keep each mixed boundary on the actual OBS video thread.
@@ -834,6 +1014,8 @@ void run_lifetimes()
 				pixels->height = step % 2 ? 359 : 181;
 				process_frame(filter, source);
 				require_processing_truth(tf, (step % 2) != 0);
+				require_checkbox_enabled(filter, tf->sessionDiagnostics.effective_provider ==
+									 "DmlExecutionProvider");
 				check(obs_data_get_bool(settings, "gpu_image_processing") == ((step % 2) != 0),
 				      "Saved request was rewritten");
 				++boundaries;
@@ -847,6 +1029,7 @@ void run_lifetimes()
 				check(tf->sessionDiagnostics.effective_provider == "CPUExecutionProvider",
 				      "Switch back to CPU left stale GPU status");
 			}
+			require_checkbox_enabled(filter, false);
 			obs_source_filter_remove(source, filter);
 			attached = false;
 			obs_source_release(filter);

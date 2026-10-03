@@ -46,6 +46,7 @@ class ImagePipeline {
 public:
 	uint64_t configure(PipelineConfig config);
 	PipelineConfig snapshot() const;
+	// False means rejected authority/shape/order; clone allocation exceptions propagate to the caller.
 	bool publish_frame(FramePacket packet);
 	std::optional<FramePacket> latest_frame() const;
 	bool publish_mask(MaskPacket packet);

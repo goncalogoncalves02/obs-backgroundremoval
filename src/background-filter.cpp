@@ -31,6 +31,7 @@
 #include <numeric>
 #include <memory>
 #include <exception>
+#include <new>
 #include <fstream>
 #include <new>
 #include <mutex>
@@ -175,6 +176,8 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	const uint64_t imageFilterId = ++nextImageFilterId;
 	// Graphics-owned independent copy; helper textures are borrowed until the next helper call.
 	gs_texture_t *imageDisplayTexture = nullptr;
+	gs_texture_t *imageCandidateTexture = nullptr;
+	bool imageDisplayValid = false;
 	uint64_t imageDisplayEpoch = 0, imageDisplayFrame = 0;
 #endif
 
@@ -302,10 +305,15 @@ try {
 		obs_properties_add_bool(props, "gpu_image_processing", obs_module_text("GPUImageProcessing"));
 	obs_property_set_long_description(processing, obs_module_text("GPUImageProcessingDescription"));
 	gpu_image::ProcessingSnapshot processingSnapshot{};
+	gpu_image::PipelineConfig processingConfig{};
 	if (ptr && *ptr) {
 		std::lock_guard lock((*ptr)->imageStateMutex);
 		processingSnapshot = (*ptr)->imagePipeline.processing_snapshot();
+		processingConfig = (*ptr)->imagePipeline.snapshot();
 	}
+	// Qualification is independent of the saved checkbox: an eligible Off control must remain actionable.
+	processingConfig.requested = true;
+	obs_property_set_enabled(processing, gpu_image::evaluate_processing_request(processingConfig).eligible);
 	obs_properties_add_text(props, "gpu_image_processing_status",
 				obs_module_text(gpu_image::processing_status_text_key(processingSnapshot).data()),
 				OBS_TEXT_INFO);
@@ -784,6 +792,9 @@ void background_filter_destroy(void *data)
 			(*ptr)->imageMaskProcessor.release();
 			gs_texture_destroy((*ptr)->imageDisplayTexture);
 			(*ptr)->imageDisplayTexture = nullptr;
+			gs_texture_destroy((*ptr)->imageCandidateTexture);
+			(*ptr)->imageCandidateTexture = nullptr;
+			(*ptr)->imageDisplayValid = false;
 #endif
 			gs_texrender_destroy((*ptr)->texrender);
 			if ((*ptr)->stagesurface) {
@@ -942,8 +953,17 @@ static void image_tick(const std::shared_ptr<background_removal_filter> &tf)
 		if (!gpu)
 			frame = tf->legacyFrame; // immutable owned storage, shallow lifetime snapshot
 	}
-	if (gpu)
-		frame = tf->imagePipeline.latest_frame(); // full compatibility clone outside state gate
+	if (gpu) {
+		try {
+			frame = tf->imagePipeline.latest_frame(); // full compatibility clone outside state gate
+		} catch (const cv::Exception &) {
+			image_fail(*tf, config.generation, "input-packet-read-failed");
+			return;
+		} catch (const std::bad_alloc &) {
+			image_fail(*tf, config.generation, "input-packet-read-failed");
+			return;
+		}
+	}
 	if (!frame)
 		return;
 	const auto packet = *frame;
@@ -1011,7 +1031,18 @@ static void image_tick(const std::shared_ptr<background_removal_filter> &tf)
 	gpu_image::MaskPacket mask{
 		packet.stamp,
 		gpu ? prepared.mask : gpu_image::finish_mask_cpu(prepared.mask, config.source, config.mask), gpu};
-	const bool published = !gpu || tf->imagePipeline.publish_mask(mask);
+	bool published = !gpu;
+	if (gpu) {
+		try {
+			published = tf->imagePipeline.publish_mask(mask);
+		} catch (const cv::Exception &) {
+			image_fail(*tf, config.generation, "mask-publication-failed");
+			return;
+		} catch (const std::bad_alloc &) {
+			image_fail(*tf, config.generation, "mask-publication-failed");
+			return;
+		}
+	}
 	std::lock_guard stateLock(tf->imageStateMutex);
 	if (!image_current(*tf, packet.stamp) || !published) {
 		++tf->imageTelemetry.stale;
@@ -1139,8 +1170,7 @@ static bool image_capture(const std::shared_ptr<background_removal_filter> &tf, 
 		epoch = tf->displayEpoch;
 	}
 	if (tf->imageDisplayEpoch != epoch) {
-		gs_texture_destroy(tf->imageDisplayTexture);
-		tf->imageDisplayTexture = nullptr;
+		tf->imageDisplayValid = false;
 		tf->imageDisplayFrame = 0;
 		tf->imageDisplayEpoch = epoch;
 	}
@@ -1159,7 +1189,16 @@ static bool image_capture(const std::shared_ptr<background_removal_filter> &tf, 
 			image_fail(*tf, config.generation, "input-readback-failed");
 			return true;
 		}
-		const bool published = tf->imagePipeline.publish_frame(*frame);
+		bool published;
+		try {
+			published = tf->imagePipeline.publish_frame(*frame);
+		} catch (const cv::Exception &) {
+			image_fail(*tf, config.generation, "input-publication-failed");
+			return true;
+		} catch (const std::bad_alloc &) {
+			image_fail(*tf, config.generation, "input-publication-failed");
+			return true;
+		}
 		std::lock_guard stateLock(tf->imageStateMutex);
 		if (!image_current(*tf, stamp) || !published) {
 			++tf->imageTelemetry.stale;
@@ -1198,9 +1237,39 @@ static bool image_capture(const std::shared_ptr<background_removal_filter> &tf, 
 static gs_texture_t *image_cached_display(background_removal_filter &tf, uint64_t epoch)
 {
 	std::lock_guard stateLock(tf.imageStateMutex);
-	if (tf.imageTerminal || tf.isDisabled || tf.displayEpoch != epoch)
+	if (tf.imageTerminal || tf.isDisabled || tf.displayEpoch != epoch || tf.imageDisplayEpoch != epoch ||
+	    !tf.imageDisplayValid)
 		return nullptr;
 	return tf.imageDisplayTexture;
+}
+// Graphics ownership only. Accepted pixels stay independent until a completed candidate is committed.
+static bool image_prepare_candidate(background_removal_filter &tf, uint32_t width, uint32_t height,
+				    gs_color_format format)
+{
+	auto *&candidate = tf.imageCandidateTexture;
+	if (candidate && (gs_texture_get_width(candidate) != width || gs_texture_get_height(candidate) != height ||
+			  gs_texture_get_color_format(candidate) != format)) {
+		gs_texture_destroy(candidate);
+		candidate = nullptr;
+	}
+	if (!candidate)
+		candidate = gs_texture_create(width, height, format, 1, nullptr, format == GS_R8 ? GS_DYNAMIC : 0);
+	return candidate != nullptr;
+}
+static bool image_upload_candidate(background_removal_filter &tf, const cv::Mat &pixels)
+{
+	uint8_t *mapped = nullptr;
+	uint32_t pitch = 0;
+	if (!gs_texture_map(tf.imageCandidateTexture, &mapped, &pitch))
+		return false;
+	if (!mapped || pitch < static_cast<uint32_t>(pixels.cols)) {
+		gs_texture_unmap(tf.imageCandidateTexture);
+		return false;
+	}
+	for (int row = 0; row < pixels.rows; ++row)
+		memcpy(mapped + size_t{pitch} * row, pixels.ptr(row), static_cast<size_t>(pixels.cols));
+	gs_texture_unmap(tf.imageCandidateTexture);
+	return true;
 }
 static gs_texture_t *image_display(const std::shared_ptr<background_removal_filter> &tf)
 {
@@ -1218,16 +1287,24 @@ static gs_texture_t *image_display(const std::shared_ptr<background_removal_filt
 		if (!gpu)
 			mask = tf->legacyMask;
 	}
-	if (gpu)
-		mask = tf->imagePipeline.latest_mask();
+	if (gpu) {
+		try {
+			mask = tf->imagePipeline.latest_mask();
+		} catch (const cv::Exception &) {
+			image_fail(*tf, config.generation, "mask-packet-read-failed");
+			return image_cached_display(*tf, epoch);
+		} catch (const std::bad_alloc &) {
+			image_fail(*tf, config.generation, "mask-packet-read-failed");
+			return image_cached_display(*tf, epoch);
+		}
+	}
 	{
 		std::lock_guard stateLock(tf->imageStateMutex);
 		if (mask && (!image_current(*tf, mask->stamp) || mask->stamp.generation != config.generation))
 			mask.reset();
 	}
 	if (tf->imageDisplayEpoch != epoch) {
-		gs_texture_destroy(tf->imageDisplayTexture);
-		tf->imageDisplayTexture = nullptr;
+		tf->imageDisplayValid = false;
 		tf->imageDisplayEpoch = epoch;
 		tf->imageDisplayFrame = 0;
 	}
@@ -1244,47 +1321,64 @@ static gs_texture_t *image_display(const std::shared_ptr<background_removal_filt
 				image_fail(*tf, config.generation, "mask-processing-failed");
 				return image_cached_display(*tf, epoch);
 			}
-		} else {
-			const auto *pixels = mask->mask.data;
-			texture = gs_texture_create(static_cast<uint32_t>(mask->mask.cols),
-						    static_cast<uint32_t>(mask->mask.rows), GS_R8, 1, &pixels, 0);
 		}
-		if (!texture)
+		const auto candidateWidth = texture ? gs_texture_get_width(texture)
+						    : static_cast<uint32_t>(mask->mask.cols);
+		const auto candidateHeight = texture ? gs_texture_get_height(texture)
+						     : static_cast<uint32_t>(mask->mask.rows);
+		const auto format = texture ? gs_texture_get_color_format(texture) : GS_R8;
+		if (!image_prepare_candidate(*tf, candidateWidth, candidateHeight, format)) {
+			if (mask->gpu_postprocess)
+				image_fail(*tf, config.generation, "display-copy-allocation-failed");
 			return image_cached_display(*tf, epoch);
-		gs_texture_t *owned = gs_texture_create(gs_texture_get_width(texture), gs_texture_get_height(texture),
-							gs_texture_get_color_format(texture), 1, nullptr, 0);
-		if (owned)
-			gs_copy_texture(owned, texture);
-		else if (mask->gpu_postprocess)
-			image_fail(*tf, config.generation, "display-copy-allocation-failed");
-		if (!mask->gpu_postprocess)
-			gs_texture_destroy(texture);
+		}
+		if (texture)
+			gs_copy_texture(tf->imageCandidateTexture, texture);
+		else if (!image_upload_candidate(*tf, mask->mask))
+			return image_cached_display(*tf, epoch);
 		{
 			std::lock_guard stateLock(tf->imageStateMutex);
-			if (owned && image_current(*tf, mask->stamp) && epoch == tf->displayEpoch) {
-				gs_texture_destroy(tf->imageDisplayTexture);
-				tf->imageDisplayTexture = owned;
+			if (image_current(*tf, mask->stamp) && epoch == tf->displayEpoch) {
+				std::swap(tf->imageDisplayTexture, tf->imageCandidateTexture);
+				tf->imageDisplayValid = true;
 				tf->imageDisplayEpoch = epoch;
 				tf->imageDisplayFrame = mask->stamp.frame_id;
-				if (mask->gpu_postprocess &&
-				    tf->imagePipeline.set_processing_state(config.generation,
-									   gpu_image::ProcessingState::Active, "none"))
-					tf->refreshImageProperties = true;
+				if (mask->gpu_postprocess) {
+					const auto before = tf->imagePipeline.processing_snapshot();
+					if ((before.state != gpu_image::ProcessingState::Active ||
+					     before.reason != "none") &&
+					    tf->imagePipeline.set_processing_state(
+						    config.generation, gpu_image::ProcessingState::Active, "none"))
+						tf->refreshImageProperties = true;
+				}
 				tf->imageTelemetry.mask_ms += image_elapsed_ms(start);
 			} else {
-				gs_texture_destroy(owned);
 				++tf->imageTelemetry.stale;
 			}
 		}
 	}
-	// A texture is always initialized. No old-source mask is stretched onto a resized source.
-	if (!tf->imageDisplayTexture) {
-		cv::Mat clear(static_cast<int>(config.source.height), static_cast<int>(config.source.width), CV_8UC1,
-			      cv::Scalar(255));
-		const auto *pixels = clear.data;
-		tf->imageDisplayTexture =
-			gs_texture_create(config.source.width, config.source.height, GS_R8, 1, &pixels, 0);
-		tf->imageDisplayEpoch = epoch;
+	// Initialize a new epoch without showing old-source pixels; reuse storage of the same size/format.
+	if (!tf->imageDisplayValid) {
+		if (!image_prepare_candidate(*tf, config.source.width, config.source.height, GS_R8))
+			return nullptr;
+		uint8_t *pixels = nullptr;
+		uint32_t pitch = 0;
+		if (!gs_texture_map(tf->imageCandidateTexture, &pixels, &pitch))
+			return nullptr;
+		const bool valid = pixels && pitch >= config.source.width;
+		if (valid)
+			for (uint32_t row = 0; row < config.source.height; ++row)
+				memset(pixels + size_t{pitch} * row, 255, config.source.width);
+		gs_texture_unmap(tf->imageCandidateTexture);
+		if (!valid)
+			return nullptr;
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (!tf->imageTerminal && !tf->isDisabled && tf->displayEpoch == epoch &&
+		    tf->imagePipeline.snapshot().generation == config.generation) {
+			std::swap(tf->imageDisplayTexture, tf->imageCandidateTexture);
+			tf->imageDisplayEpoch = epoch;
+			tf->imageDisplayValid = true;
+		}
 	}
 	return image_cached_display(*tf, epoch);
 }
