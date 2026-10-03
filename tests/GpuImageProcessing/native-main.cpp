@@ -21,6 +21,7 @@ int main(int argc, char **argv)
 {
 	graphics_t *graphics = nullptr;
 	bool entered = false;
+	bool scene_started = false;
 	try {
 		std::filesystem::path effect_root, model;
 		for (int i = 1; i < argc; i += 2) {
@@ -45,13 +46,27 @@ int main(int argc, char **argv)
 		entered = true;
 		std::cout << "graphics-ready backend=" << gs_get_device_name() << std::endl;
 		gs_enum_adapters(print_adapter, nullptr);
+		const auto initial_cull = gs_get_cull_mode();
+		std::cout << "graphics-draw-setup initial-cull=" << static_cast<int>(initial_cull)
+			  << " desired-cull=" << static_cast<int>(GS_NEITHER) << std::endl;
+		// Match pinned obs-video.c render_video(): gs_create alone is not an OBS 2D scene.
+		gs_begin_scene();
+		scene_started = true;
+		gs_enable_depth_test(false);
+		gs_set_cull_mode(GS_NEITHER);
+		if (gs_get_cull_mode() != GS_NEITHER)
+			throw std::runtime_error("Native fixture could not establish OBS 2D draw state");
 		run_input_cases(effect_root);
+		gs_end_scene();
+		scene_started = false;
 		gs_leave_context();
 		entered = false;
 		gs_destroy(graphics);
 		std::cout << "gpu-input-cases PASS" << std::endl;
 		return 0;
 	} catch (const std::exception &error) {
+		if (scene_started)
+			gs_end_scene();
 		if (entered)
 			gs_leave_context();
 		if (graphics)

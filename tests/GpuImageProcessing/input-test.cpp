@@ -91,10 +91,29 @@ static cv::Mat prepared_input(const cv::Mat &bgra)
 	return floats;
 }
 
+static void print_pixel_diagnostics(const char *label, const cv::Mat &image)
+{
+	const auto first = image.at<cv::Vec4b>(0, 0);
+	const auto center = image.at<cv::Vec4b>(image.rows / 2, image.cols / 2);
+	const auto mean = cv::mean(image);
+	double minimum = 0, maximum = 0;
+	cv::minMaxLoc(image.reshape(1), &minimum, &maximum);
+	std::cout << label << " dimensions=" << image.cols << 'x' << image.rows << " range=[" << minimum << ','
+		  << maximum << "] bgra-mean=[" << mean[0] << ',' << mean[1] << ',' << mean[2] << ',' << mean[3]
+		  << "] first=[" << static_cast<unsigned>(first[0]) << ',' << static_cast<unsigned>(first[1]) << ','
+		  << static_cast<unsigned>(first[2]) << ',' << static_cast<unsigned>(first[3]) << "] center=["
+		  << static_cast<unsigned>(center[0]) << ',' << static_cast<unsigned>(center[1]) << ','
+		  << static_cast<unsigned>(center[2]) << ',' << static_cast<unsigned>(center[3]) << ']' << std::endl;
+}
+
 static void reference_case(Dimensions dimensions, bool similarity, const std::string &effect)
 {
 	const auto input = deterministic_input(dimensions);
 	SourceTexture source(input);
+	const auto source_pixels = read_source(source.texture);
+	print_pixel_diagnostics("source-upload", source_pixels);
+	require(cv::norm(source_pixels, input, cv::NORM_INF) == 0,
+		"Uploaded source texture pixels must match the CPU fixture before downscale");
 	auto config = config_for(dimensions);
 	config.image_similarity = similarity;
 	GpuInputPreprocessor processor;
@@ -121,14 +140,16 @@ static void reference_case(Dimensions dimensions, bool similarity, const std::st
 		require(packet->similarity_bgra.size() == input.size() &&
 				cv::norm(packet->similarity_bgra, input, cv::NORM_INF) == 0,
 			"Similarity must retain the exact full-resolution image");
+	cv::Mat resized;
+	cv::resize(input, resized, cv::Size(256, 144), 0, 0, cv::INTER_LINEAR);
+	print_pixel_diagnostics("expected-reduced", resized);
+	print_pixel_diagnostics("reduced-readback", packet->input_bgra);
 	const auto reference = prepared_input(input);
 	const auto actual = prepared_input(packet->input_bgra);
 	const double mae = cv::norm(reference, actual, cv::NORM_L1) / static_cast<double>(reference.total() * 3);
 	std::cout << "input-reference source=" << dimensions.width << 'x' << dimensions.height
 		  << " normalized-mae=" << mae << " similarity=" << similarity << std::endl;
 	require(mae <= 0.01, "Prepared RGB float input exceeds normalized MAE 0.01");
-	cv::Mat resized;
-	cv::resize(input, resized, cv::Size(256, 144), 0, 0, cv::INTER_LINEAR);
 	require(cv::norm(resized, packet->input_bgra, cv::NORM_L1) / static_cast<double>(resized.total() * 4 * 255) <=
 			0.01,
 		"BGRA including alpha must match the CPU reference");
