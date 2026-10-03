@@ -213,9 +213,9 @@ gs_texture_t *GpuMaskProcessor::morphology(gs_texture_t *input, int radius, bool
 {
 	if (radius == 0)
 		return input;
-	gs_effect_set_int(radius_, radius);
-	gs_effect_set_bool(eroding_, eroding);
 	for (const bool horizontal : {true, false}) {
+		gs_effect_set_int(radius_, radius);
+		gs_effect_set_bool(eroding_, eroding);
 		set_axis(axis_, horizontal);
 		auto *target = input == gs_texrender_get_texture(full_[0]) ? full_[1] : full_[0];
 		input = render(input, target, source_, "Morphology");
@@ -265,8 +265,13 @@ gs_texture_t *GpuMaskProcessor::process(const MaskPacket &packet, const MaskSett
 			gs_effect_set_int(radius_, radius);
 			gs_effect_set_float(reciprocal_, 1.0f / static_cast<float>((radius + 1) * (radius + 1)));
 			current = render(current, small_[0], input_, "StackRow");
-			if (current)
+			if (current) {
+				// Ending each gs_effect_loop technique clears every effect parameter value.
+				gs_effect_set_int(radius_, radius);
+				gs_effect_set_float(reciprocal_,
+						    1.0f / static_cast<float>((radius + 1) * (radius + 1)));
 				current = render(current, small_[1], input_, "StackColumn");
+			}
 		}
 		gs_effect_set_bool(post_threshold_, smooth);
 		if (current)
@@ -278,11 +283,13 @@ gs_texture_t *GpuMaskProcessor::process(const MaskPacket &packet, const MaskSett
 				kernel += kernel % 2 == 0 ? 1 : 0;
 				current = morphology(current, kernel / 3, false);
 				gs_effect_set_int(radius_, kernel / 2);
-				gs_effect_set_float(reciprocal_, 1.0f / static_cast<float>(kernel * kernel));
 				if (current)
 					current = render(current, box_sum_, source_, "BoxRow");
-				if (current)
+				if (current) {
+					gs_effect_set_int(radius_, kernel / 2);
+					gs_effect_set_float(reciprocal_, 1.0f / static_cast<float>(kernel * kernel));
 					current = render(current, full_[0], source_, "BoxColumn");
+				}
 			}
 		}
 		if (!current) {
