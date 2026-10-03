@@ -8,6 +8,8 @@
 #include "obs-utils/background-mask-cpu.hpp"
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <future>
 #include <iostream>
 #include <stdexcept>
@@ -18,6 +20,29 @@ void check(bool condition, const char *message)
 {
 	if (!condition)
 		throw std::runtime_error(message);
+}
+bool valid_probability_output(const cv::Mat &output)
+{
+	if (output.empty() || output.dims != 2 || output.type() != CV_32FC1 || !cv::checkRange(output))
+		return false;
+	double minimum, maximum;
+	cv::minMaxLoc(output, &minimum, &maximum);
+	// checkRange's max is exclusive and cast to float for CV_32F. Keep finite
+	// validation separate, then use exact inclusive bounds without a tolerance.
+	return minimum >= 0.0 && maximum <= 1.0;
+}
+void probability_endpoint_regression()
+{
+	for (float value : {0.0f, -0.0f, 1.0f})
+		check(valid_probability_output(cv::Mat(1, 1, CV_32FC1, cv::Scalar(value))),
+		      "Exact inclusive probability endpoint was rejected");
+	for (float value : {std::nextafter(1.0f, std::numeric_limits<float>::infinity()), -0.25f,
+			    std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+			    -std::numeric_limits<float>::infinity()})
+		check(!valid_probability_output(cv::Mat(1, 1, CV_32FC1, cv::Scalar(value))),
+		      "Non-finite or out-of-range probability was accepted");
+	std::cout << "filter-baseline probability-regression endpoints=inclusive nonfinite/outside=rejected"
+		  << std::endl;
 }
 // A test-only observer of the real MediaPipe implementation. Every operation
 // delegates unchanged base behavior; no synthetic Session, tensors or success.
@@ -49,9 +74,21 @@ struct ObservedMediaPipe final : ModelMediaPipe {
 	{
 		check(run_completed, "MediaPipe postprocess has no completed real Session::Run");
 		ModelMediaPipe::postprocessOutput(output);
-		check(!output.empty() && output.dims == 2 && output.type() == CV_32FC1 &&
-			      cv::checkRange(output, true, nullptr, 0.0, 1.00000001),
-		      "Actual MediaPipe output must be finite single-channel probabilities in [0,1]");
+		const bool valid = valid_probability_output(output);
+		if (completed_outputs == 0 || !valid) {
+			if (!output.empty() && output.dims == 2 && output.type() == CV_32FC1) {
+				double minimum, maximum;
+				cv::minMaxLoc(output, &minimum, &maximum);
+				obs_log(LOG_INFO,
+					"Actual CPU MediaPipe output width=%d height=%d finite=%s min=%.9g max=%.9g valid=%s",
+					output.cols, output.rows, cv::checkRange(output) ? "true" : "false", minimum,
+					maximum, valid ? "true" : "false");
+			} else {
+				obs_log(LOG_INFO, "Actual CPU MediaPipe output dims=%d type=%d empty=%s valid=false",
+					output.dims, output.type(), output.empty() ? "true" : "false");
+			}
+		}
+		check(valid, "Actual MediaPipe output must be finite single-channel probabilities in [0,1]");
 		completed_output = output.clone();
 		++completed_outputs;
 		run_completed = false;
@@ -444,6 +481,7 @@ int main(int argc, char **argv)
 		std::cout << "filter-core graphics=" << module_name << " reset begin" << std::endl;
 		check(obs_reset_video(&video) == OBS_VIDEO_SUCCESS, "Actual OBS graphics/video initialization failed");
 		register_sources();
+		probability_endpoint_regression();
 		initialized_mask_is_not_completion();
 		run_lifetimes();
 		obs_shutdown();
