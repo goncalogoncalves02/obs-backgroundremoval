@@ -211,6 +211,29 @@ cv::Mat compare_setting(GpuMaskProcessor &processor, const Sample &reference, co
 	const auto reduced = prepare_small_mask(candidate.mask, candidate_history, settings);
 	mask_contract(baseline.mask, {256, 144}, name + "/prepared-reference");
 	mask_contract(reduced.mask, {256, 144}, name + "/prepared-candidate");
+	if (settings.temporal_smooth_factor > 0 && settings.temporal_smooth_factor < 1) {
+		const auto diagnose_history = [&](const cv::Mat &previous, const SmallMaskPreparation &prepared,
+						  const std::string &stream) {
+			mask_contract(prepared.temporal_history, {256, 144},
+				      name + "/history-before-contours/" + stream);
+			const int intermediate =
+				cv::countNonZero((prepared.temporal_history > 0) & (prepared.temporal_history < 255));
+			const double delta =
+				previous.empty() ? 0 : cv::norm(previous, prepared.temporal_history, cv::NORM_L1);
+			std::cout << "quality-history case=" << name << " stream=" << stream
+				  << " previous-present=" << !previous.empty() << " history-delta-l1=" << delta
+				  << " weighted-intermediate-pixels=" << intermediate
+				  << " history-nonzero=" << cv::countNonZero(prepared.temporal_history)
+				  << " reconstructed-contour-nonzero=" << cv::countNonZero(prepared.mask) << std::endl;
+			if (!previous.empty())
+				require(delta > 0 && intermediate > 0,
+					name + ": temporal transition must change actual uncontoured weighted history");
+		};
+		diagnose_history(reference_history, baseline, "reference");
+		diagnose_history(candidate_history, reduced, "candidate");
+		require(baseline.temporal_history.data != reduced.temporal_history.data,
+			name + ": baseline and candidate temporal histories must own separate storage");
+	}
 	reference_history = baseline.temporal_history;
 	candidate_history = reduced.temporal_history;
 	const double prepared_mae = input_mae(reference, candidate);
@@ -296,18 +319,26 @@ void source_cases(CommonCpuSession &session, const cv::Mat &portrait, Dimensions
 				reference_history, candidate_history);
 	}
 	if (size == Dimensions{641, 359}) {
-		std::cout << "quality-motion synthetic-translation-of-still-portrait" << std::endl;
+		std::cout << "quality-motion synthetic-translation-of-still-portrait offsets=0,64,128" << std::endl;
 		cv::Mat translated(frame.size(), frame.type(), cv::Scalar(0, 0, 0, 255));
+		cv::Mat translated_again(frame.size(), frame.type(), cv::Scalar(0, 0, 0, 255));
 		constexpr int translation = 64;
 		frame(cv::Rect(0, 0, frame.cols - translation, frame.rows))
 			.copyTo(translated(cv::Rect(translation, 0, frame.cols - translation, frame.rows)));
+		frame(cv::Rect(0, 0, frame.cols - 2 * translation, frame.rows))
+			.copyTo(translated_again(
+				cv::Rect(2 * translation, 0, frame.cols - 2 * translation, frame.rows)));
 		auto temporal = moderate;
 		temporal.temporal_smooth_factor = 0.65f;
 		temporal.contour_filter = 0.0001f;
 		cv::Mat reference_history, candidate_history, previous_cpu;
 		int changed_masks = 0;
 		uint64_t frame_id = 1;
-		for (const auto &sequence_frame : {frame, translated, frame}) {
+		// Weighted history contains nonzero support from both prior and current
+		// masks. Contours reconstruct that support at 255, so A -> B -> A can
+		// retain the same union on the last frame. A third position supplies new
+		// support while keeping the real temporal/contour settings unchanged.
+		for (const auto &sequence_frame : {frame, translated, translated_again}) {
 			const auto name = prefix + "/temporal-frame-" + std::to_string(frame_id);
 			const auto motion_pair = infer_frame(session, input, sequence_frame, frame_id, name);
 			const auto cpu = compare_setting(mask, motion_pair.reference, motion_pair.candidate, size,
