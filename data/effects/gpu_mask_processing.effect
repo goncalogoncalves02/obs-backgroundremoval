@@ -1,0 +1,138 @@
+// SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float2 image_size;
+uniform float2 target_size;
+uniform float2 axis;
+uniform int radius;
+uniform float reciprocal;
+uniform bool post_threshold;
+uniform bool eroding;
+
+sampler_state pointClamp {
+	Filter = Point;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+VertData VSDefault(VertData v)
+{
+	v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+	return v;
+}
+float sample_raw(float2 p)
+{
+	// Explicit LOD permits the alias-preserving prefix's nonuniform loop length.
+	return image.SampleLevel(pointClamp, (clamp(p, float2(0, 0), image_size - 1) + 0.5) / image_size, 0).r;
+}
+float sample_byte(float2 p)
+{
+	return round(sample_raw(p) * 255.0);
+}
+float4 byte_color(float value)
+{
+	float normalized = clamp(value, 0.0, 255.0) / 255.0;
+	return float4(normalized, normalized, normalized, 1.0);
+}
+float4 PSStackRow(VertData v) : TARGET
+{
+	float2 p = floor(v.uv * target_size);
+	// OpenCV4.12 scalar small-kernel IN-PLACE row reads already-written left pixels.
+	// The configured vcpkg core/jpeg port disables intrinsics. Preserve that recurrence
+	// in one model-sized draw; no full-resolution CPU postprocessing is involved.
+	if (radius <= 4 && image_size.x > 2 * radius + 1) {
+		float4 history = float4(0, 0, 0, 0);
+		for (int x = 0; x <= int(p.x); ++x) {
+			float center = sample_byte(float2(x, p.y));
+			float sum = center * (radius + 1);
+			for (int d = 1; d <= radius; ++d) {
+				float left = x == 0 ? center : history[max(0, min(d, x) - 1)];
+				sum += (left + sample_byte(float2(x + d, p.y))) * (radius + 1 - d);
+			}
+			float value = floor(sum * reciprocal);
+			history = float4(value, history.xyz);
+		}
+		return byte_color(history.x);
+	}
+	float sum = 0.0;
+	for (int d = -radius; d <= radius; ++d)
+		sum += sample_byte(p + float2(d, 0)) * (radius + 1 - abs(d));
+	return byte_color(round(sum * reciprocal));
+}
+float4 PSStackColumn(VertData v) : TARGET
+{
+	float2 p = floor(v.uv * target_size);
+	float sum = 0.0;
+	for (int d = -radius; d <= radius; ++d)
+		sum += sample_byte(p + float2(0, d)) * (radius + 1 - abs(d));
+	return byte_color(floor(sum * reciprocal));
+}
+float4 PSResize(VertData v) : TARGET
+{
+	float2 p = (floor(v.uv * target_size) + 0.5) * image_size / target_size - 0.5;
+	float2 base = floor(p);
+	float2 fraction = p - base;
+	// OpenCV clamps horizontal out-of-range coefficients; vertical rows clamp separately.
+	if (base.x < 0 || base.x >= image_size.x - 1)
+		fraction.x = 0.0;
+	int a1 = int(round(fraction.x * 2048.0));
+	int a0 = 2048 - a1;
+	int b1 = int(round(fraction.y * 2048.0));
+	int b0 = 2048 - b1;
+	int top = int(sample_byte(base)) * a0 + int(sample_byte(base + float2(1, 0))) * a1;
+	int bottom = int(sample_byte(base + float2(0, 1))) * a0 + int(sample_byte(base + float2(1, 1))) * a1;
+	// Preserve the scalar CV8U INTER_LINEAR quantization before strict postthreshold.
+	int value = ((b0 * (top / 16)) / 65536 + (b1 * (bottom / 16)) / 65536 + 2) / 4;
+	if (post_threshold)
+		value = value > 128 ? 255 : 0;
+	return byte_color(float(value));
+}
+float4 PSMorphology(VertData v) : TARGET
+{
+	float2 p = floor(v.uv * target_size);
+	float result = eroding ? 255.0 : 0.0;
+	for (int d = -radius; d <= radius; ++d) {
+		float2 q = p + axis * d;
+		if (q.x >= 0 && q.y >= 0 && q.x < image_size.x && q.y < image_size.y) {
+			float value = sample_byte(q);
+			result = eroding ? min(result, value) : max(result, value);
+		}
+	}
+	return byte_color(result);
+}
+float reflect101(float position, float size)
+{
+	if (size <= 1.0)
+		return 0.0;
+	float period = 2.0 * (size - 1.0);
+	float mapped = position - floor(position / period) * period;
+	return min(mapped, period - mapped);
+}
+float4 PSBoxRow(VertData v) : TARGET
+{
+	float2 p = floor(v.uv * target_size);
+	float sum = 0.0;
+	for (int d = -radius; d <= radius; ++d)
+		sum += sample_byte(float2(reflect101(p.x + d, image_size.x), p.y));
+	// R32F keeps the integer sum. An8-bit intermediate would change normalization.
+	return float4(sum, 0, 0, 1);
+}
+float4 PSBoxColumn(VertData v) : TARGET
+{
+	float2 p = floor(v.uv * target_size);
+	float sum = 0.0;
+	for (int d = -radius; d <= radius; ++d)
+		sum += sample_raw(float2(p.x, reflect101(p.y + d, image_size.y)));
+	return byte_color(round(sum * reciprocal));
+}
+technique StackRow { pass { vertex_shader = VSDefault(v); pixel_shader = PSStackRow(v); } }
+technique StackColumn { pass { vertex_shader = VSDefault(v); pixel_shader = PSStackColumn(v); } }
+technique Resize { pass { vertex_shader = VSDefault(v); pixel_shader = PSResize(v); } }
+technique Morphology { pass { vertex_shader = VSDefault(v); pixel_shader = PSMorphology(v); } }
+technique BoxRow { pass { vertex_shader = VSDefault(v); pixel_shader = PSBoxRow(v); } }
+technique BoxColumn { pass { vertex_shader = VSDefault(v); pixel_shader = PSBoxColumn(v); } }

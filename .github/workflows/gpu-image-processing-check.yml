@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU image processing Windows check
+
+on:
+  push:
+    branches: [feature/windows-ml-amd-gpu-image-processing]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-x64:
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      upload-artifacts: true
+      attest-artifacts: false
+      runs-on: windows-2025-vs2026

@@ -1,0 +1,278 @@
+﻿# SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Concrete manifest is rendered only after verified plugin packaging.
+# HANDOFF_MANIFEST:@@MANIFEST_BASE64@@
+[CmdletBinding()]
+param([ValidateSet('Instalar','Restaurar')][string]$Acao='Instalar',[string]$Zip)
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function Get-DeliveryHash([string]$Path) {
+    Assert-DeliverySafePath $Path
+    $item=Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or $item.Length -eq 0) { throw "Ficheiro obrigatório vazio/em falta: $Path" }
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+function Assert-DeliverySafePath([string]$Path) {
+    $current=[IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item=Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Link/junction proibido no caminho: $current" }
+        }
+        $parent=Split-Path -Parent $current
+        if ($parent -eq $current) { break }
+        $current=$parent
+    }
+}
+function Assert-DeliveryRelativePath([string]$Path) {
+    if (-not $Path -or $Path -match '[:\\]' -or $Path.StartsWith('/') -or $Path.EndsWith('/') -or
+        @($Path.Split('/') | Where-Object { $_ -in @('','.', '..') -or $_.EndsWith('.') -or $_.EndsWith(' ') }).Count) {
+        throw "Caminho ZIP inválido: $Path"
+    }
+}
+function Get-DeliveryInventory([string]$Root) {
+    Assert-DeliverySafePath $Root
+    $base=[IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('/','\'))
+    $result=@()
+    $directories=New-Object 'System.Collections.Generic.Stack[string]'
+    $directories.Push($base)
+    while ($directories.Count) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $directories.Pop() -Force)) {
+            Assert-DeliverySafePath $file.FullName
+            if ($file.PSIsContainer) {$directories.Push($file.FullName);continue}
+            $relative=$file.FullName.Substring($base.Length+1).Replace('\','/')
+            Assert-DeliveryRelativePath $relative
+            $result+=[pscustomobject]@{ Path=$relative; Sha256=(Get-DeliveryHash $file.FullName); Length=$file.Length }
+        }
+    }
+    return $result
+}
+function Assert-DeliveryTree([string]$Root,[object[]]$Files) {
+    $actual=@(Get-DeliveryInventory $Root)
+    if ($actual.Count -ne $Files.Count) { throw 'Inventário da pasta difere do recibo.' }
+    foreach ($file in $Files) {
+        Assert-DeliveryRelativePath $file.Path
+        $found=@($actual | Where-Object { $_.Path -ceq $file.Path })
+        if ($found.Count -ne 1 -or $found[0].Sha256 -cne $file.Sha256 -or $found[0].Length -ne $file.Length) {
+            throw "Ficheiro diferente/incompleto: $($file.Path)"
+        }
+    }
+}
+function Expand-VerifiedPlugin([string]$Zip,[string]$Destination,$Manifest) {
+    if ((Get-DeliveryHash $Zip) -cne $Manifest.ZipSha256) { throw 'ZIP não corresponde à entrega exata.' }
+    Assert-DeliverySafePath $Destination
+    if (Test-Path -LiteralPath $Destination) { throw 'Pasta temporária de extração já existe.' }
+    $archive=[IO.Compression.ZipFile]::OpenRead([IO.Path]::GetFullPath($Zip))
+    $seen=@{}
+    try {
+        foreach ($entry in $archive.Entries) {
+            if (-not $entry.Name) {
+                $directory=$entry.FullName.TrimEnd('/')
+                Assert-DeliveryRelativePath $directory
+                if ($directory -ne 'obs-backgroundremoval' -and -not $directory.StartsWith('obs-backgroundremoval/')) { throw 'Diretório ZIP fora do plugin.' }
+                continue
+            }
+            Assert-DeliveryRelativePath $entry.FullName
+            if (-not $entry.FullName.StartsWith('obs-backgroundremoval/')) { throw 'ZIP tem ficheiro fora do plugin.' }
+            $relative=$entry.FullName.Substring('obs-backgroundremoval/'.Length)
+            if ($seen.ContainsKey($relative)) { throw 'ZIP tem caminhos duplicados/conflitantes.' }
+            $seen[$relative]=$true
+            $expected=@($Manifest.Files | Where-Object { $_.Path -ceq $relative })
+            $unixType=($entry.ExternalAttributes -shr 16) -band 0xf000
+            if ($expected.Count -ne 1 -or $entry.Length -ne $expected[0].Length -or
+                $unixType -eq 0xa000 -or ($entry.ExternalAttributes -band 0x400) -ne 0) { throw "Entrada ZIP inesperada/insegura: $relative" }
+        }
+        if ($seen.Count -ne $Manifest.Files.Count) { throw 'ZIP incompleto.' }
+        New-Item -Path $Destination -ItemType Directory | Out-Null
+        foreach ($entry in $archive.Entries) {
+            if (-not $entry.Name) { continue }
+            $target=Join-Path $Destination $entry.FullName
+            New-Item -Path (Split-Path -Parent $target) -ItemType Directory -Force | Out-Null
+            $source=$entry.Open()
+            $output=[IO.File]::Open($target,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $source.CopyTo($output) } finally { $source.Dispose(); $output.Dispose() }
+        }
+    } finally { $archive.Dispose() }
+    Assert-DeliveryTree (Join-Path $Destination 'obs-backgroundremoval') $Manifest.Files
+}
+function Find-DeliveryZip([string]$Explicit,[string]$ScriptDirectory,[string]$Downloads,[string]$ExpectedHash) {
+    if ($Explicit) {
+        if ((Get-DeliveryHash $Explicit) -cne $ExpectedHash) { throw 'O ZIP indicado não corresponde à entrega.' }
+        return [IO.Path]::GetFullPath($Explicit)
+    }
+    foreach ($directory in @($ScriptDirectory,$Downloads)) {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) { continue }
+        foreach ($file in @(Get-ChildItem -LiteralPath $directory -Filter '*.zip' -File | Sort-Object Name)) {
+            if ((Get-DeliveryHash $file.FullName) -ceq $ExpectedHash) { return $file.FullName }
+        }
+    }
+    throw 'Extrai o único ZIP de entrega para uma pasta. Mantém juntos plugin ZIP e os dois scripts; nenhum ZIP exato foi encontrado.'
+}
+function Write-DeliveryReceipt($Receipt,[string]$Path) {
+    Assert-DeliverySafePath $Path
+    New-Item -Path (Split-Path -Parent $Path) -ItemType Directory -Force | Out-Null
+    $temporary=$Path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try {
+        $Receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporary -Encoding UTF8
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+}
+function Move-DeliveryDirectory([string]$Source,[string]$Destination) {
+    Assert-DeliverySafePath $Source; Assert-DeliverySafePath $Destination
+    if (Test-Path -LiteralPath $Destination) { throw 'Destino já existe; não substituído.' }
+    Move-Item -LiteralPath $Source -Destination $Destination
+}
+function Copy-DeliveryDirectory([string]$Source,[string]$Destination) {
+    Assert-DeliverySafePath $Source; Assert-DeliverySafePath $Destination
+    if (Test-Path -LiteralPath $Destination) { throw 'Destino do backup já existe.' }
+    Copy-Item -LiteralPath $Source -Destination $Destination -Recurse
+}
+function Install-DeliveryPlugin([string]$Zip,[string]$Installed,[string]$BackupRoot,[string]$ReceiptPath,[string]$PriorReceiptPath,$Manifest) {
+    foreach ($path in @($Installed,$BackupRoot,$ReceiptPath)) { Assert-DeliverySafePath $path }
+    if (Test-Path -LiteralPath $ReceiptPath) { throw 'Já existe recibo desta entrega. Usa Restaurar ou preserva-o para investigação.' }
+    if (Test-Path -LiteralPath $BackupRoot) { throw 'Pasta de backup já existe.' }
+    $hadPrevious=Test-Path -LiteralPath $Installed -PathType Container
+    if ((Test-Path -LiteralPath $Installed) -and -not $hadPrevious) { throw 'Destino de instalação não é uma pasta.' }
+    $previousFiles=@(); if ($hadPrevious) { $previousFiles=@(Get-DeliveryInventory $Installed) }
+    New-Item -Path $BackupRoot -ItemType Directory -Force | Out-Null
+    $stage=Join-Path $BackupRoot 'package'
+    $previous=Join-Path $BackupRoot 'previous-plugin'
+    $previousReceiptCopy=$null; $previousReceiptHash=$null
+    if ($PriorReceiptPath) {
+        $previousReceiptHash=Get-DeliveryHash $PriorReceiptPath
+        $previousReceiptCopy=Join-Path $BackupRoot 'previous-receipt.json'
+        Copy-Item -LiteralPath $PriorReceiptPath -Destination $previousReceiptCopy
+        if ((Get-DeliveryHash $previousReceiptCopy) -cne $previousReceiptHash) { throw 'Cópia do recibo anterior incompleta.' }
+    }
+    $r=[ordered]@{ SchemaVersion=1; SourceSha=$Manifest.SourceSha; ZipSha256=$Manifest.ZipSha256; MeasurementSha256=$Manifest.MeasurementSha256
+        RunId=$Manifest.RunId; ArtifactName=$Manifest.ArtifactName; Installed=[IO.Path]::GetFullPath($Installed); BackupRoot=[IO.Path]::GetFullPath($BackupRoot)
+        Previous=$previous; HadPrevious=$hadPrevious; PreviousFiles=$previousFiles; PriorReceiptPath=$PriorReceiptPath
+        PriorReceiptCopy=$previousReceiptCopy; PriorReceiptSha256=$previousReceiptHash; Files=$Manifest.Files; State='prepared'; InstalledAt=$null; Withdrawn=$null }
+    $movedPrevious=$false; $installedNew=$false
+    try {
+        Expand-VerifiedPlugin $Zip $stage $Manifest
+        Write-DeliveryReceipt $r $ReceiptPath
+        New-Item -Path (Split-Path -Parent $Installed) -ItemType Directory -Force | Out-Null
+        if ($hadPrevious) { Move-DeliveryDirectory $Installed $previous; $movedPrevious=$true }
+        Move-DeliveryDirectory (Join-Path $stage 'obs-backgroundremoval') $Installed
+        $installedNew=$true
+        Assert-DeliveryTree $Installed $Manifest.Files
+        $r.State='installed'; $r.InstalledAt=(Get-Date).ToUniversalTime().ToString('o')
+        Write-DeliveryReceipt $r $ReceiptPath
+        return [pscustomobject]$r
+    } catch {
+        $original=$_
+        # Determine completed moves from actual folders; a failed wrapper may have moved before raising.
+        if (Test-Path -LiteralPath $previous) { $movedPrevious=$true }
+        if ($movedPrevious -or -not $hadPrevious) {
+            if (Test-Path -LiteralPath $Installed) {
+                Move-DeliveryDirectory $Installed (Join-Path $BackupRoot ('failed-new-'+[guid]::NewGuid().ToString('N')))
+            }
+            if ($hadPrevious -and $movedPrevious) {
+                Assert-DeliveryTree $previous $previousFiles
+                Copy-DeliveryDirectory $previous $Installed
+                Assert-DeliveryTree $Installed $previousFiles
+            }
+        }
+        $r.State='rolled-back'
+        try { Write-DeliveryReceipt $r $ReceiptPath } catch { Write-Host 'Rollback da pasta concluído; gravação do recibo falhou. Preserva backup/recibo para investigação.' }
+        throw $original
+    }
+}
+function Read-DeliveryReceipt([string]$Path,$Manifest) {
+    $r=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if ($r.SchemaVersion -ne 1 -or $r.SourceSha -cne $Manifest.SourceSha -or $r.ZipSha256 -cne $Manifest.ZipSha256 -or $r.State -cne 'installed') {
+        throw 'Recibo de instalação diferente/incompleto; preserva-o.'
+    }
+    foreach ($path in @($r.Installed,$r.BackupRoot,$r.Previous)) { Assert-DeliverySafePath $path }
+    if ([IO.Path]::GetFullPath($r.Previous) -ine [IO.Path]::GetFullPath((Join-Path $r.BackupRoot 'previous-plugin'))) { throw 'Caminho de backup no recibo inválido.' }
+    Assert-DeliveryTree $r.Installed $Manifest.Files
+    return $r
+}
+function Restore-DeliveryPlugin([string]$ReceiptPath,$Manifest) {
+    $r=Read-DeliveryReceipt $ReceiptPath $Manifest
+    if (-not $r.HadPrevious) { throw 'Não existia instalação anterior. Preserva esta instalação/recibo para retirada orientada.' }
+    Assert-DeliveryTree $r.Previous $r.PreviousFiles
+    if ($r.PriorReceiptCopy -and (Get-DeliveryHash $r.PriorReceiptCopy) -cne $r.PriorReceiptSha256) { throw 'Backup do recibo anterior diferente.' }
+    $suffix=[guid]::NewGuid().ToString('N'); $staged=Join-Path $r.BackupRoot ('restore-'+$suffix); $withdrawn=Join-Path $r.BackupRoot ('withdrawn-new-'+$suffix)
+    $priorReceiptBytes=[IO.File]::ReadAllBytes($ReceiptPath)
+    try {
+        Copy-DeliveryDirectory $r.Previous $staged
+        Assert-DeliveryTree $staged $r.PreviousFiles
+        Move-DeliveryDirectory $r.Installed $withdrawn
+        Move-DeliveryDirectory $staged $r.Installed
+        Assert-DeliveryTree $r.Installed $r.PreviousFiles
+        $r.State='restored'; $r.Withdrawn=$withdrawn
+        Write-DeliveryReceipt $r $ReceiptPath
+    } catch {
+        $original=$_
+        if (Test-Path -LiteralPath $withdrawn) {
+            if (Test-Path -LiteralPath $r.Installed) { Move-DeliveryDirectory $r.Installed (Join-Path $r.BackupRoot ('failed-restore-'+$suffix)) }
+            Move-DeliveryDirectory $withdrawn $r.Installed
+            Assert-DeliveryTree $r.Installed $Manifest.Files
+        }
+        [IO.File]::WriteAllBytes($ReceiptPath,$priorReceiptBytes)
+        throw $original
+    }
+    Write-Host 'RESTAURO OK. Build anterior e recibo aceite preservados; ambas as builds continuam no backup.'
+}
+function Get-DeliveryManifest([string]$ScriptPath) {
+    $text=Get-Content -LiteralPath $ScriptPath -Raw
+    if ($text -notmatch '(?m)^# HANDOFF_MANIFEST:([A-Za-z0-9+/=]+)\r?$') { throw 'Template não é instalador concreto. Usa a entrega verificada.' }
+    $manifest=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1])) | ConvertFrom-Json
+    if ($manifest.SchemaVersion -ne 1 -or $manifest.SourceSha -cnotmatch '^[0-9a-f]{40}$' -or
+        $manifest.ZipSha256 -cnotmatch '^[0-9a-f]{64}$' -or $manifest.MeasurementSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $manifest.WindowsMlVersion -cne '2.2.12') { throw 'Manifesto de entrega inválido.' }
+    return $manifest
+}
+function Find-PreviousDeliveryReceipt([string]$Installed,[string[]]$Roots) {
+    $candidates=@()
+    foreach ($root in $Roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($file in @(Get-ChildItem -LiteralPath $root -Filter 'installation.json' -File -Recurse)) {
+            $r=Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+            if ($r.PSObject.Properties.Name -notcontains 'Installed' -or $r.Installed -ine $Installed -or $r.State -ne 'installed') { continue }
+            $matchesCurrent=$false
+            if ($r.PSObject.Properties.Name -contains 'Files') {
+                try { Assert-DeliveryTree $Installed $r.Files; $matchesCurrent=$true } catch { $matchesCurrent=$false }
+            } elseif ($r.PSObject.Properties.Name -contains 'PluginDllSha256') {
+                $matchesCurrent=(Get-DeliveryHash (Join-Path $Installed 'bin/64bit/obs-backgroundremoval.dll')) -ieq $r.PluginDllSha256
+            }
+            if ($matchesCurrent) { $candidates+=$file.FullName }
+        }
+    }
+    if ($candidates.Count -gt 1) { throw 'Existem vários recibos atuais. Preserva-os e envia apenas este erro.' }
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+    return $null
+}
+
+try {
+    if ($env:OS -ne 'Windows_NT') { throw 'Este instalador destina-se ao Windows.' }
+    if (Get-Process obs64,obs32 -ErrorAction SilentlyContinue) { throw 'Fecha OBS antes de instalar/restaurar.' }
+    $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Abre PowerShell como administrador e executa o mesmo comando.' }
+    $manifest=Get-DeliveryManifest $PSCommandPath
+    $measurement=Join-Path $PSScriptRoot 'testar-processamento-gpu.ps1'
+    if ((Get-DeliveryHash $measurement) -cne $manifest.MeasurementSha256) { throw 'Script de comparação desta entrega em falta/diferente.' }
+    $installed=Join-Path $env:ProgramData 'obs-studio/plugins/obs-backgroundremoval'
+    foreach ($other in @((Join-Path $env:ProgramFiles 'obs-studio/obs-plugins/64bit/obs-backgroundremoval.dll'),
+        (Join-Path $env:APPDATA 'obs-studio/plugins/obs-backgroundremoval'))) {
+        if (Test-Path -LiteralPath $other) { throw 'Outra instalação do plugin encontrada; preserva-a e envia este erro.' }
+    }
+    $receiptPath=Join-Path $env:ProgramData ('obs-br-gpu-image-receipts/'+$manifest.SourceSha+'/installation.json')
+    if ($Acao -eq 'Restaurar') {
+        $r=Read-DeliveryReceipt $receiptPath $manifest
+        if ($r.Installed -ine $installed -or (Split-Path -Parent $r.BackupRoot) -ine (Join-Path $env:ProgramData 'obs-br-plugin-backups')) { throw 'Caminhos do recibo diferentes da instalação esperada.' }
+        Restore-DeliveryPlugin $receiptPath $manifest
+    } else {
+        $zipPath=Find-DeliveryZip $Zip $PSScriptRoot (Join-Path $env:USERPROFILE 'Downloads') $manifest.ZipSha256
+        $previousReceipt=Find-PreviousDeliveryReceipt $installed @((Join-Path $env:ProgramData 'obs-br-directml-receipts'),(Join-Path $env:ProgramData 'obs-br-gpu-image-receipts'))
+        $backup=Join-Path $env:ProgramData ('obs-br-plugin-backups/gpu-image-'+$manifest.SourceSha.Substring(0,8)+'-'+[guid]::NewGuid().ToString('N'))
+        $r=Install-DeliveryPlugin $zipPath $installed $backup $receiptPath $previousReceipt $manifest
+        Write-Host 'INSTALAÇÃO OK. Abre OBS, mantém a mesma cena/câmera e executa testar-processamento-gpu.ps1 nesta pasta.'
+        Write-Host 'Para restaurar: executa este instalador com -Acao Restaurar, com OBS fechado.'
+    }
+    exit 0
+} catch { Write-Host ('ERRO: '+$_.Exception.Message); Write-Host 'Interrompido. Preserva os ficheiros e envia apenas esta mensagem.'; exit 1 }

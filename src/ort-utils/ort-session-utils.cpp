@@ -48,8 +48,10 @@
 #endif // __APPLE__
 
 #ifdef _WIN32
-#include <wchar.h>
-#include <windows.h>
+#include "windows-ml-session.hpp"
+#include "windows-ml-provider-policy.hpp"
+#include <limits>
+#include <cstdio>
 #endif // _WIN32
 
 #include <obs-module.h>
@@ -58,8 +60,241 @@
 #include "../consts.h"
 #include "../plugin-support.h"
 
+void resetOrtSessionData(ORTModelData &data) noexcept
+{
+	data.inputTensor.clear();
+	data.outputTensor.clear();
+	data.inputNames.clear();
+	data.outputNames.clear();
+	data.inputDims.clear();
+	data.outputDims.clear();
+	data.session.reset();
+	data.inputTensorValues.clear();
+	data.outputTensorValues.clear();
+}
+
+#ifdef _WIN32
+namespace {
+const char *present(const std::string &value) noexcept
+{
+	return value.empty() ? "none" : value.c_str();
+}
+const char *outcomeName(windows_ml::SessionOutcome outcome) noexcept
+{
+	switch (outcome) {
+	case windows_ml::SessionOutcome::NotInitialized:
+		return "NotInitialized";
+	case windows_ml::SessionOutcome::Constructed:
+		return "Constructed";
+	case windows_ml::SessionOutcome::Ready:
+		return "Ready";
+	case windows_ml::SessionOutcome::Failed:
+		return "Failed";
+	}
+	return "Unknown";
+}
+const char *stageName(windows_ml::ProviderFailureStage stage) noexcept
+{
+	switch (stage) {
+	case windows_ml::ProviderFailureStage::None:
+		return "None";
+	case windows_ml::ProviderFailureStage::Discovery:
+		return "Discovery";
+	case windows_ml::ProviderFailureStage::Activation:
+		return "Activation";
+	case windows_ml::ProviderFailureStage::Registration:
+		return "Registration";
+	case windows_ml::ProviderFailureStage::DeviceSelection:
+		return "DeviceSelection";
+	case windows_ml::ProviderFailureStage::Attachment:
+		return "Attachment";
+	}
+	return "Unknown";
+}
+bool validMetadata(const std::vector<Ort::AllocatedStringPtr> &names,
+		   const std::vector<std::vector<int64_t>> &dimensions)
+{
+	if (names.empty() || names.size() != dimensions.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < names.size(); ++i) {
+		if (!names[i] || !*names[i] || dimensions[i].empty()) {
+			return false;
+		}
+		int64_t elements = 1;
+		for (const auto dimension : dimensions[i]) {
+			if (dimension <= 0 || elements > std::numeric_limits<int64_t>::max() / dimension) {
+				return false;
+			}
+			elements *= dimension;
+		}
+		if (static_cast<uint64_t>(elements) > std::numeric_limits<size_t>::max() / sizeof(float)) {
+			return false;
+		}
+	}
+	return true;
+}
+bool validBuffers(const std::vector<std::vector<int64_t>> &dimensions, const std::vector<std::vector<float>> &values,
+		  const std::vector<Ort::Value> &tensors)
+{
+	if (dimensions.size() != values.size() || dimensions.size() != tensors.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < dimensions.size(); ++i) {
+		// Metadata was checked before allocation; its product cannot overflow.
+		if (!tensors[i] || !tensors[i].IsTensor() ||
+		    values[i].size() != static_cast<size_t>(vectorProduct(dimensions[i]))) {
+			return false;
+		}
+	}
+	return true;
+}
+// Retain a GPU constructor error as well as the later adapter error.
+int failWindowsMlInitialization(filter_data &data, int code, std::string_view error) noexcept
+{
+	resetOrtSessionData(data);
+	auto &diagnostics = data.sessionDiagnostics;
+	diagnostics.outcome = windows_ml::SessionOutcome::Failed;
+	diagnostics.effective_provider.clear();
+	windows_ml::assign_sanitized_diagnostic(
+		diagnostics.error, diagnostics.error,
+		diagnostics.error.empty() || error.empty() ? "" : "; model initialization: ", error);
+	return code;
+}
+void beginWindowsMlInitialization(filter_data &data) noexcept
+{
+	resetOrtSessionData(data);
+	data.modelFilepath.clear();
+	data.sessionDiagnostics = {};
+	data.sessionDiagnostics.outcome = windows_ml::SessionOutcome::Failed;
+	windows_ml::assign_sanitized_diagnostic(data.sessionDiagnostics.requested_provider, data.useGPU);
+}
+int initializeWindowsMlSession(filter_data &data, const std::filesystem::path &modelPath)
+{
+	if (!data.model || !data.env) {
+		return failWindowsMlInitialization(data, OBS_BGREMOVAL_ORT_SESSION_ERROR_INVALID_MODEL,
+						   "model or environment is not initialized");
+	}
+	if (data.numThreads > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+		return failWindowsMlInitialization(data, OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP,
+						   "CPU thread count is not representable");
+	}
+	std::error_code pathError;
+	if (modelPath.empty() || !std::filesystem::is_regular_file(modelPath, pathError) || pathError) {
+		return failWindowsMlInitialization(data, OBS_BGREMOVAL_ORT_SESSION_ERROR_FILE_NOT_FOUND,
+						   "model file is missing or invalid");
+	}
+	data.modelFilepath = modelPath.native();
+	auto result = windows_ml::create_session(*data.env, modelPath,
+						 {data.useGPU, data.modelSelection == MODEL_MEDIAPIPE,
+						  static_cast<int>(data.numThreads)});
+	data.sessionDiagnostics = std::move(result.diagnostics);
+	data.session = std::move(result.session);
+	if (!data.session) {
+		return failWindowsMlInitialization(data, OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP, "");
+	}
+	data.model->populateInputOutputNames(data.session, data.inputNames, data.outputNames);
+	if (!data.model->populateInputOutputShapes(data.session, data.inputDims, data.outputDims) ||
+	    !validMetadata(data.inputNames, data.inputDims) || !validMetadata(data.outputNames, data.outputDims)) {
+		return failWindowsMlInitialization(data, OBS_BGREMOVAL_ORT_SESSION_ERROR_INVALID_INPUT_OUTPUT,
+						   "invalid model metadata");
+	}
+	data.model->allocateTensorBuffers(data.inputDims, data.outputDims, data.outputTensorValues,
+					  data.inputTensorValues, data.inputTensor, data.outputTensor);
+	if (!validBuffers(data.inputDims, data.inputTensorValues, data.inputTensor) ||
+	    !validBuffers(data.outputDims, data.outputTensorValues, data.outputTensor)) {
+		return failWindowsMlInitialization(data, OBS_BGREMOVAL_ORT_SESSION_ERROR_INVALID_INPUT_OUTPUT,
+						   "incomplete model tensor buffers");
+	}
+	data.sessionDiagnostics.outcome = windows_ml::SessionOutcome::Ready;
+	return OBS_BGREMOVAL_ORT_SESSION_SUCCESS;
+}
+} // namespace
+
+void logWindowsMlSessionOutcome(const windows_ml::SessionDiagnostics &diagnostics, std::string_view model)
+{
+	const auto *attempt = diagnostics.provider_attempt ? &*diagnostics.provider_attempt : nullptr;
+	const auto *device = attempt && attempt->selected_device ? &*attempt->selected_device : nullptr;
+	const bool activeGpu = diagnostics.outcome == windows_ml::SessionOutcome::Ready && device &&
+			       diagnostics.effective_provider == device->ep_name;
+	char hresult[16] = "none";
+	if (attempt && attempt->error_hresult) {
+		snprintf(hresult, sizeof(hresult), "0x%08x", static_cast<unsigned int>(*attempt->error_hresult));
+	}
+	obs_log(diagnostics.outcome == windows_ml::SessionOutcome::Ready ? LOG_INFO : LOG_ERROR,
+		"Windows ML session: outcome=%s requested=%s runtime=%s effective=%s model=%.*s fallback=%s "
+		"catalog_provider=%s readiness_before=%s readiness_after=%s activation=%s registration=%s "
+		"active_ep=%s vendor=0x%08x device=0x%08x attempted_ep=%s attempted_vendor=0x%08x "
+		"attempted_device=0x%08x stage=%s hresult=%s provider_error=%s error=%s cpu_error=%s",
+		outcomeName(diagnostics.outcome), present(diagnostics.requested_provider),
+		present(diagnostics.requested_runtime_provider), present(diagnostics.effective_provider),
+		static_cast<int>(std::min(model.size(), static_cast<size_t>(std::numeric_limits<int>::max()))),
+		model.empty() ? "" : model.data(), present(diagnostics.fallback_reason),
+		attempt ? present(attempt->discovered_provider_name) : "none",
+		attempt ? present(attempt->ready_state_before) : "none",
+		attempt ? present(attempt->ready_state_after) : "none",
+		attempt && attempt->process_activation_attempted ? "true" : "false",
+		attempt && attempt->provider_registration_succeeded ? "true" : "false",
+		activeGpu ? present(device->ep_name) : "none",
+		activeGpu ? static_cast<unsigned int>(device->vendor_id) : 0u,
+		activeGpu ? static_cast<unsigned int>(device->device_id) : 0u,
+		device ? present(device->ep_name) : "none", device ? static_cast<unsigned int>(device->vendor_id) : 0u,
+		device ? static_cast<unsigned int>(device->device_id) : 0u,
+		attempt ? stageName(attempt->failure_stage) : "None", hresult,
+		attempt ? present(attempt->error) : "none", present(diagnostics.error), present(diagnostics.cpu_error));
+}
+
+int createWindowsMlOrtSession(filter_data *tf, const std::filesystem::path &modelPath)
+{
+	if (!tf) {
+		return OBS_BGREMOVAL_ORT_SESSION_ERROR_INVALID_MODEL;
+	}
+	int code = OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP;
+	try {
+		beginWindowsMlInitialization(*tf);
+		code = initializeWindowsMlSession(*tf, modelPath);
+	} catch (const std::exception &error) {
+		code = failWindowsMlInitialization(*tf, OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP, error.what());
+	} catch (...) {
+		code = failWindowsMlInitialization(*tf, OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP,
+						   "unknown model initialization failure");
+	}
+	logWindowsMlSessionOutcome(tf->sessionDiagnostics, tf->modelSelection);
+	return code;
+}
+#endif
+
 int createOrtSession(filter_data *tf)
 {
+#ifdef _WIN32
+	if (!tf) {
+		return OBS_BGREMOVAL_ORT_SESSION_ERROR_INVALID_MODEL;
+	}
+	beginWindowsMlInitialization(*tf);
+	try {
+		// OBS returns UTF-8. Own its allocation even if path conversion throws.
+		const auto freePath = [](char *path) {
+			bfree(path);
+		};
+		std::unique_ptr<char, decltype(freePath)> path(obs_module_file(tf->modelSelection.c_str()), freePath);
+		const std::string_view utf8Path = path ? path.get() : "";
+		return createWindowsMlOrtSession(
+			tf, path ? std::filesystem::path(std::u8string(utf8Path.begin(), utf8Path.end()))
+				 : std::filesystem::path{});
+	} catch (const std::exception &error) {
+		beginWindowsMlInitialization(*tf);
+		const int code =
+			failWindowsMlInitialization(*tf, OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP, error.what());
+		logWindowsMlSessionOutcome(tf->sessionDiagnostics, tf->modelSelection);
+		return code;
+	} catch (...) {
+		const int code = failWindowsMlInitialization(*tf, OBS_BGREMOVAL_ORT_SESSION_ERROR_STARTUP,
+							     "unknown model path resolution failure");
+		logWindowsMlSessionOutcome(tf->sessionDiagnostics, tf->modelSelection);
+		return code;
+	}
+#else
+	resetOrtSessionData(*tf);
 	if (tf->model.get() == nullptr) {
 		obs_log(LOG_ERROR, "Model object is not initialized");
 		return OBS_BGREMOVAL_ORT_SESSION_ERROR_INVALID_MODEL;
@@ -85,13 +320,7 @@ int createOrtSession(filter_data *tf)
 
 	std::string modelFilepath_s(modelFilepath_rawPtr);
 
-#if _WIN32
-	int outLength = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_rawPtr, -1, nullptr, 0);
-	tf->modelFilepath = std::wstring(outLength, L'\0');
-	MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, modelFilepath_rawPtr, -1, tf->modelFilepath.data(), outLength);
-#else
 	tf->modelFilepath = std::string(modelFilepath_rawPtr);
-#endif
 
 	bfree(modelFilepath_rawPtr);
 
@@ -159,11 +388,12 @@ int createOrtSession(filter_data *tf)
 					 tf->inputTensor, tf->outputTensor);
 
 	return OBS_BGREMOVAL_ORT_SESSION_SUCCESS;
+#endif
 }
 
 bool runFilterModelInference(filter_data *tf, const cv::Mat &imageBGRA, cv::Mat &output)
 {
-	if (tf->session.get() == nullptr) {
+	if (!tf || tf->isDisabled || tf->session.get() == nullptr) {
 		// Onnx runtime session is not initialized. Problem in initialization
 		return false;
 	}

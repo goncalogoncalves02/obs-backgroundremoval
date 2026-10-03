@@ -20,6 +20,8 @@ const char *const MODEL_ENHANCE_SGLLIE = "models/semantic_guided_llie_180x324.on
 const char *const MODEL_DEPTH_TCMONODEPTH = "models/tcmonodepth_tcsmallnet_192x320.onnx";
 
 const char *const USEGPU_CPU = "cpu";
+const char *const USEGPU_WINML_DIRECTML = "winml-directml";
+const char *const USEGPU_WINML_MIGRAPHX = "winml-migraphx";
 const char *const USEGPU_CUDA = "cuda";
 const char *const USEGPU_ROCM = "rocm";
 const char *const USEGPU_MIGRAPHX = "migraphx";
