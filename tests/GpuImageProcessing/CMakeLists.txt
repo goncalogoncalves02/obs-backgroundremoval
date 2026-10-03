@@ -34,7 +34,7 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
   add_test(NAME gpu-image-pipeline COMMAND gpu-image-pipeline)
   set_tests_properties(gpu-image-pipeline PROPERTIES TIMEOUT 60)
 
-  add_executable(gpu-image-mask-reference mask-reference-test.cpp)
+  add_executable(gpu-image-mask-reference mask-reference-test.cpp "${GPU_IMAGE_SOURCE_DIR}/background-mask-cpu.cpp")
   target_include_directories(gpu-image-mask-reference PRIVATE "${GPU_IMAGE_SOURCE_DIR}")
   target_compile_features(gpu-image-mask-reference PRIVATE cxx_std_20)
   target_link_libraries(gpu-image-mask-reference PRIVATE BuildOptions OpenCV::opencv_core OpenCV::opencv_imgproc)
@@ -49,10 +49,13 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
     graphics-faults.cpp
     "${GPU_IMAGE_SOURCE_DIR}/gpu-image-policy.cpp"
     "${GPU_IMAGE_SOURCE_DIR}/gpu-input-preprocessor.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/background-mask-cpu.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-mask-processor.cpp"
   )
   # Source properties are scoped to this tests directory: the plugin's compilation is untouched.
   set_source_files_properties(
     "${GPU_IMAGE_SOURCE_DIR}/gpu-input-preprocessor.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-mask-processor.cpp"
     PROPERTIES COMPILE_OPTIONS "/FI${CMAKE_CURRENT_SOURCE_DIR}/graphics-faults.hpp"
   )
   target_include_directories(gpu-image-processing-native PRIVATE "${GPU_IMAGE_SOURCE_DIR}")

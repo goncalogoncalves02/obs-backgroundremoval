@@ -312,6 +312,8 @@ if(WIN32)
       src/obs-utils/gpu-image-policy.cpp
       src/obs-utils/gpu-image-pipeline.cpp
       src/obs-utils/gpu-input-preprocessor.cpp
+      src/obs-utils/background-mask-cpu.cpp
+      src/obs-utils/gpu-mask-processor.cpp
   )
 endif()
 
@@ -356,7 +358,7 @@ set(
 )
 
 if(WIN32)
-  list(APPEND EFFECTS_FILES data/effects/input_downscale.effect)
+  list(APPEND EFFECTS_FILES data/effects/input_downscale.effect data/effects/gpu_mask_processing.effect)
 endif()
 
 set(

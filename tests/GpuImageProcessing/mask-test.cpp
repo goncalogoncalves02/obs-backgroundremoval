@@ -4,8 +4,9 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <memory>
+#include <limits>
 
-#if __has_include("gpu-mask-processor.hpp")
 #include "gpu-mask-processor.hpp"
 #include "background-mask-cpu.hpp"
 #include "graphics-fault-controls.hpp"
@@ -81,11 +82,12 @@ static cv::Mat cpu_display(const cv::Mat &small, Dimensions source, const MaskSe
 		cv::resize(expected, expected, {static_cast<int>(source.width), static_cast<int>(source.height)});
 	return expected;
 }
-static void reference_case(GpuMaskProcessor &processor, const std::string &effect, const cv::Mat &small,
-			   Dimensions source, const MaskSettings &settings, const char *name)
+static cv::Mat reference_case(GpuMaskProcessor &processor, const std::string &effect, const cv::Mat &small,
+			      Dimensions source, const MaskSettings &settings, const char *name)
 {
 	const Dimensions input{static_cast<uint32_t>(small.cols), static_cast<uint32_t>(small.rows)};
-	require(processor.prepare(input, source, effect.c_str()), "GPU mask preparation failed");
+	if (!processor.prepare(input, source, effect.c_str()))
+		throw std::runtime_error("GPU mask preparation failed: " + processor.failure_reason());
 	const auto original = small.clone();
 	MaskPacket packet{{1, 1, source, input}, small, true};
 	const bool srgb = gs_framebuffer_srgb_enabled(), linear = gs_get_linear_srgb();
@@ -98,8 +100,10 @@ static void reference_case(GpuMaskProcessor &processor, const std::string &effec
 	gs_set_linear_srgb(linear);
 	if (!output)
 		throw std::runtime_error("GPU mask failed: " + processor.failure_reason());
-	compare(read_mask(output), cpu_display(small, source, settings), name);
+	const auto actual = read_mask(output);
+	compare(actual, cpu_display(small, source, settings), name);
 	require(cv::norm(original, small, cv::NORM_INF) == 0, "Mask processing must not mutate packet pixels");
+	return actual;
 }
 
 void run_mask_cases(const std::filesystem::path &effect_root)
@@ -146,12 +150,34 @@ void run_mask_cases(const std::filesystem::path &effect_root)
 		cv::Mat boundary(144, 256, CV_8UC1, cv::Scalar(value));
 		reference_case(processor, effect, boundary, {512, 288}, settings, "postthreshold_constant_boundary");
 	}
+	std::cout << "case scalar_alias_boundary_and_strided_upload" << std::endl;
+	settings = {};
+	settings.enable_threshold = true;
+	settings.smooth_contour = 0.001f;
+	cv::Mat scalar_boundary = cv::Mat::zeros(3, 32, CV_8UC1);
+	scalar_boundary.col(1).setTo(255);
+	scalar_boundary.col(2).setTo(140);
+	reference_case(processor, effect, scalar_boundary, {32, 3}, settings, "scalar_alias_boundary");
+	cv::Mat parent(146, 260, CV_8UC1, cv::Scalar(199));
+	auto strided = parent(cv::Rect(2, 1, 256, 144));
+	mask.copyTo(strided);
+	require(!strided.isContinuous(), "Upload fixture must have a non-contiguous row stride");
+	reference_case(processor, effect, strided, {641, 359}, settings, "strided_upload");
+	for (int x = 0; x < levels.cols; ++x)
+		levels.col(x).setTo(126 + (x % 5));
+	for (const auto smoothing : {0.001f, 0.2f, 0.5f, 1.0f}) {
+		settings.smooth_contour = smoothing;
+		reference_case(processor, effect, levels, {512, 288}, settings, "spatial_postthreshold_boundaries");
+	}
 	std::cout << "case known_empty_full_masks" << std::endl;
 	settings.smooth_contour = 1;
 	settings.feather = 1;
 	for (const auto value : {0, 255}) {
 		cv::Mat constant(144, 256, CV_8UC1, cv::Scalar(value));
-		reference_case(processor, effect, constant, {512, 288}, settings, "known_empty_full_masks");
+		const auto actual =
+			reference_case(processor, effect, constant, {512, 288}, settings, "known_empty_full_masks");
+		require(cv::countNonZero(actual != value) == 0,
+			"Known empty/full masks must retain every exact constant byte");
 	}
 	require(foreground_iou(cv::Mat::zeros(2, 2, CV_8UC1), cv::Mat::zeros(2, 2, CV_8UC1)) == 1,
 		"Both empty sets IoU must be1");
@@ -184,14 +210,64 @@ void run_mask_cases(const std::filesystem::path &effect_root)
 	processor.release();
 	reference_case(processor, effect, mask, {1280, 720}, settings, "resize_and_repeated_release");
 	processor.release();
+	const auto empty_resources = gpu_test::counts().live_resources;
+	for (unsigned failed_allocation = 0; failed_allocation < 7; ++failed_allocation) {
+		gpu_test::fail_graphics_allocation_after(failed_allocation);
+		require(!processor.prepare({256, 144}, {512, 288}, effect.c_str()),
+			"Injected partial graphics allocation must fail preparation");
+		require(!processor.failure_reason().empty(), "Partial allocation failure needs a diagnostic");
+		require(gpu_test::counts().live_resources == empty_resources,
+			"Failed prepare must release every partial graphics resource");
+		processor.release();
+		processor.release();
+		reference_case(processor, effect, mask, {512, 288}, settings, "partial_allocation_recovery");
+		processor.release();
+		require(gpu_test::counts().live_resources == empty_resources,
+			"Recovered release must leave no graphics resources");
+	}
+	gpu_test::fail_next_render_begin();
+	require(!processor.prepare({256, 144}, {512, 288}, effect.c_str()),
+		"Initial render-target materialization failure must fail prepare");
+	require(gpu_test::counts().live_resources == empty_resources,
+		"Failed target materialization must release partial resources");
+	reference_case(processor, effect, mask, {512, 288}, settings, "materialization_recovery");
+	MaskPacket packet{{1, 1, {512, 288}, {256, 144}}, mask, true};
+	const auto before_upload = gpu_test::counts();
+	gpu_test::fail_next_upload_map();
+	require(!processor.process(packet, settings), "Failed mask upload must not return prior output");
+	require(!processor.failure_reason().empty(), "Upload failure must have diagnostic");
+	require(gpu_test::counts().upload_maps == before_upload.upload_maps &&
+			gpu_test::counts().upload_unmaps == before_upload.upload_unmaps,
+		"Failed upload mapping must not be unmapped");
+	reference_case(processor, effect, mask, {512, 288}, settings, "upload_map_recovery");
+	gpu_test::fail_next_render_begin();
+	require(!processor.process(packet, settings), "Failed mask draw must not return prior output");
+	require(gpu_test::counts().live_resources == empty_resources, "Draw failure must discard processor resources");
+	reference_case(processor, effect, mask, {512, 288}, settings, "draw_recovery");
+	MaskPacket wrong_type = packet;
+	wrong_type.mask = cv::Mat(144, 256, CV_32FC1, cv::Scalar(0));
+	require(!processor.process(wrong_type, settings),
+		"Float packet must be rejected rather than uploaded as bytes");
+	auto invalid_settings = settings;
+	invalid_settings.smooth_contour = std::numeric_limits<float>::quiet_NaN();
+	require(!processor.process(packet, invalid_settings),
+		"Nonfinite spatial settings must fail without a stale output");
+	auto *borrowed = processor.process(packet, settings);
+	require(borrowed != nullptr, "Borrowed mask must be available inside graphics ownership");
+	const auto accepted = read_mask(borrowed);
+	std::unique_ptr<gs_texture_t, decltype(&gs_texture_destroy)> display_copy(
+		gs_texture_create(512, 288, GS_BGRA, 1, nullptr, GS_RENDER_TARGET), &gs_texture_destroy);
+	require(display_copy != nullptr, "Consumer-owned display texture allocation failed");
+	gs_copy_texture(display_copy.get(), borrowed); // Consume only during the valid borrowed lifetime.
+	packet.mask = 255 - mask;
+	require(processor.process(packet, settings) != nullptr, "Subsequent changed mask processing failed");
+	processor.release();
+	processor.release(); // borrowed is now invalid and never dereferenced again.
+	require(cv::norm(read_mask(display_copy.get()), accepted, cv::NORM_INF) == 0,
+		"Consumer-owned copy must survive later process and processor release");
+	require(gpu_test::counts().live_resources == empty_resources,
+		"Mask processor must release every owned graphics resource");
+	require(gpu_test::counts().upload_maps == gpu_test::counts().upload_unmaps,
+		"Every successful small-mask upload must be unmapped");
 	std::cout << "gpu-mask-cases PASS" << std::endl;
 }
-#else
-void run_mask_cases(const std::filesystem::path &effect_root)
-{
-	std::cout << "mask-effect-present="
-		  << std::filesystem::is_regular_file(effect_root / "gpu_mask_processing.effect") << std::endl;
-	throw std::runtime_error(
-		"Task3 RED: missing gpu-mask-processor.hpp and gpu_mask_processing.effect implementation");
-}
-#endif

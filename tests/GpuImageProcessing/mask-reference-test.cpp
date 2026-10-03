@@ -6,9 +6,7 @@
 #include <iostream>
 #include <stdexcept>
 
-#if __has_include("background-mask-cpu.hpp")
 #include "background-mask-cpu.hpp"
-#endif
 
 using namespace gpu_image;
 
@@ -168,6 +166,15 @@ template<typename Prepare, typename Finish> static void fixed_expectations(Prepa
 	cv::Mat binary_expected = cv::Mat::zeros(3, 7, CV_8UC1);
 	binary_expected.col(1).setTo(255);
 	equal(finish(impulse, {7, 3}, settings), binary_expected, "In-place stack blur and >128 ordering changed");
+	// The configured OpenCV4.12 port disables intrinsics. Width32 distinguishes
+	// scalar in-place history from a16-byte SIMD row: its x2 would exceed128.
+	cv::Mat alias_boundary = cv::Mat::zeros(3, 32, CV_8UC1);
+	alias_boundary.col(1).setTo(255);
+	alias_boundary.col(2).setTo(140);
+	cv::Mat scalar_expected = cv::Mat::zeros(3, 32, CV_8UC1);
+	scalar_expected.col(1).setTo(255);
+	equal(finish(alias_boundary, {32, 3}, settings), scalar_expected,
+	      "Pinned scalar in-place row must not become SIMD or out-of-place blur");
 	settings.smooth_contour = 0;
 	settings.mask_expansion = 1;
 	cv::Mat square = cv::Mat::zeros(5, 5, CV_8UC1);
@@ -198,12 +205,8 @@ int main()
 	try {
 		std::cout << "opencv-mask-reference version=" << CV_VERSION << std::endl;
 		fixed_expectations(legacy::prepare, legacy::finish);
-#if __has_include("background-mask-cpu.hpp")
 		fixed_expectations(prepare_small_mask, finish_mask_cpu);
 		return 0;
-#else
-		throw std::runtime_error("Task3 RED: missing background-mask-cpu.hpp helper implementation");
-#endif
 	} catch (const std::exception &error) {
 		std::cerr << "mask-reference FAIL: " << error.what() << std::endl;
 		return 1;
