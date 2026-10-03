@@ -456,6 +456,8 @@ jobs:
           $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
           $env:Path = "$CMAKE_BINDIR;$env:Path"
+          & $env:PYTHON_COMMAND tests/GpuImageProcessing/test_native_registration.py
+          if ($LASTEXITCODE -ne 0) { throw 'Native quality registration fixtures failed.' }
           & $env:PYTHON_COMMAND tests/GpuImageProcessing/test_graphics_runtime_staging.py
           if ($LASTEXITCODE -ne 0) { throw 'Graphics runtime staging fixtures failed.' }
           ./tests/GpuImageProcessing/stage-graphics-runtime.ps1 `
@@ -493,7 +495,8 @@ jobs:
           & $env:PYTHON_COMMAND scripts/verify_windows_ml_package.py `
             --install-root (Join-Path $env:GITHUB_WORKSPACE 'build_prefix') `
             --archive (Join-Path $env:GITHUB_WORKSPACE $env:DLL_ARTIFACT_NAME) `
-            --windows-ml-root $env:WINDOWS_ML_PREFIX
+            --windows-ml-root $env:WINDOWS_ML_PREFIX `
+            --effects-source-root (Join-Path $env:GITHUB_WORKSPACE 'data/effects')
           if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Package production session-check artifact and record receipts

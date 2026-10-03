@@ -6,3 +6,6 @@
 .github/workflows/*.lock.yml linguist-generated=true merge=ours
 docs/download-trends.svg linguist-generated=true merge=ours
 docs/star-history.svg linguist-generated=true merge=ours
+# Byte-exact package/source origin on Windows, independent of core.autocrlf.
+data/effects/input_downscale.effect text eol=lf
+data/effects/gpu_mask_processing.effect text eol=lf

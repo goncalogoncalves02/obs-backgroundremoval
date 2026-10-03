@@ -10,6 +10,8 @@
 
 void run_input_cases(const std::filesystem::path &effect_root);
 void run_mask_cases(const std::filesystem::path &effect_root);
+void run_quality_cases(const std::filesystem::path &effect_root, const std::filesystem::path &model,
+		       const std::filesystem::path &portrait);
 
 static bool print_adapter(void *, const char *name, uint32_t id)
 {
@@ -24,7 +26,7 @@ int main(int argc, char **argv)
 	bool entered = false;
 	bool scene_started = false;
 	try {
-		std::filesystem::path effect_root, model;
+		std::filesystem::path effect_root, model, portrait;
 		for (int i = 1; i < argc; i += 2) {
 			if (i + 1 >= argc)
 				throw std::runtime_error("Missing option value");
@@ -32,11 +34,14 @@ int main(int argc, char **argv)
 				effect_root = argv[i + 1];
 			else if (std::string(argv[i]) == "--model")
 				model = argv[i + 1];
+			else if (std::string(argv[i]) == "--portrait")
+				portrait = argv[i + 1];
 			else
 				throw std::runtime_error("Unknown option");
 		}
-		if (!std::filesystem::is_directory(effect_root) || !std::filesystem::is_regular_file(model))
-			throw std::runtime_error("Explicit effect root and MediaPipe model are required");
+		if (!std::filesystem::is_directory(effect_root) || !std::filesystem::is_regular_file(model) ||
+		    !std::filesystem::is_regular_file(portrait))
+			throw std::runtime_error("Explicit effect root, MediaPipe model and portrait are required");
 		const auto module = std::filesystem::absolute(argv[0]).parent_path() / "libobs-d3d11.dll";
 		std::cout << "graphics-create module=" << module.string() << std::endl;
 		const int status = gs_create(&graphics, module.string().c_str(), 0);
@@ -59,12 +64,13 @@ int main(int argc, char **argv)
 			throw std::runtime_error("Native fixture could not establish OBS 2D draw state");
 		run_input_cases(effect_root);
 		run_mask_cases(effect_root);
+		run_quality_cases(effect_root, model, portrait);
 		gs_end_scene();
 		scene_started = false;
 		gs_leave_context();
 		entered = false;
 		gs_destroy(graphics);
-		std::cout << "gpu-input-cases PASS" << std::endl;
+		std::cout << "gpu-image-processing-native PASS input/mask/model-quality" << std::endl;
 		return 0;
 	} catch (const std::exception &error) {
 		if (scene_started)
@@ -73,7 +79,7 @@ int main(int argc, char **argv)
 			gs_leave_context();
 		if (graphics)
 			gs_destroy(graphics);
-		std::cerr << "gpu-input-cases FAIL: " << error.what() << std::endl;
+		std::cerr << "gpu-image-processing-native FAIL: " << error.what() << std::endl;
 		return 1;
 	}
 }

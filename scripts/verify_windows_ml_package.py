@@ -15,6 +15,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PLUGIN_BIN = Path("obs-backgroundremoval/bin/64bit")
 PLUGIN_LICENSES = Path("obs-backgroundremoval/licenses")
+PLUGIN_EFFECTS = Path("obs-backgroundremoval/data/effects")
+GPU_EFFECTS = ("input_downscale.effect", "gpu_mask_processing.effect")
 PACKAGE_NATIVE = Path("runtimes/win-x64/native")
 RUNTIME_FILES = (
     "obs-backgroundremoval.dll",
@@ -110,14 +112,27 @@ def files_named(entries: list[Path], filename: str) -> list[Path]:
     return sorted(path for path in entries if path.name.casefold() == expected)
 
 
-def require_same_file(actual: Path, expected: Path) -> None:
+def require_same_file(actual: Path, expected: Path, origin: str = "Windows ML package") -> None:
     require_nonempty_file(actual)
     require_nonempty_file(expected)
     if sha256_file(actual) != sha256_file(expected):
-        raise PackageContractError(f"{actual} does not match the Windows ML package file {expected}")
+        raise PackageContractError(f"{actual} does not match the {origin} file {expected}")
 
 
-def verify_install_tree(install_root: Path, windows_ml_root: Path) -> None:
+def require_effect_source_root(root: Path) -> None:
+    absolute = root.absolute()
+    for directory in (absolute, *absolute.parents):
+        try:
+            metadata = os.lstat(directory)
+        except OSError as error:
+            raise PackageContractError(f"could not inspect effect source directory {directory}: {error}") from error
+        require_safe_install_entry(directory, metadata)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise PackageContractError(f"effect source directory is missing: {directory}")
+
+
+def verify_install_tree(install_root: Path, windows_ml_root: Path, effects_source_root: Path) -> None:
+    require_effect_source_root(effects_source_root)
     entries = install_tree_entries(install_root)
     plugin_bin = install_root / PLUGIN_BIN
     plugin_licenses = install_root / PLUGIN_LICENSES
@@ -143,6 +158,8 @@ def verify_install_tree(install_root: Path, windows_ml_root: Path) -> None:
     )
     for installed_name, package_name in LEGAL_MAP.items():
         require_same_file(plugin_licenses / installed_name, windows_ml_root / package_name)
+    for name in GPU_EFFECTS:
+        require_same_file(install_root / PLUGIN_EFFECTS / name, effects_source_root / name, "effect source")
 
 
 def normalize_archive_path(name: str) -> PurePosixPath:
@@ -196,16 +213,18 @@ def require_archive_same_file(
     entries: dict[str, tuple[PurePosixPath, zipfile.ZipInfo]],
     actual_path: Path,
     expected_path: Path,
+    origin: str = "Windows ML package",
 ) -> None:
     actual_data = require_archive_file(archive, entries, actual_path)
     require_nonempty_file(expected_path)
     if sha256_bytes(actual_data) != sha256_file(expected_path):
         raise PackageContractError(
-            f"{actual_path.as_posix()} does not match the Windows ML package file {expected_path}"
+            f"{actual_path.as_posix()} does not match the {origin} file {expected_path}"
         )
 
 
-def verify_archive(archive_path: Path, windows_ml_root: Path) -> None:
+def verify_archive(archive_path: Path, windows_ml_root: Path, effects_source_root: Path) -> None:
+    require_effect_source_root(effects_source_root)
     package_native = windows_ml_root / PACKAGE_NATIVE
     try:
         archive = zipfile.ZipFile(archive_path)
@@ -255,6 +274,8 @@ def verify_archive(archive_path: Path, windows_ml_root: Path) -> None:
                 PLUGIN_LICENSES / installed_name,
                 windows_ml_root / package_name,
             )
+        for name in GPU_EFFECTS:
+            require_archive_same_file(archive, entries, PLUGIN_EFFECTS / name, effects_source_root / name, "effect source")
 
 
 def main() -> int:
@@ -262,11 +283,12 @@ def main() -> int:
     parser.add_argument("--install-root", required=True, type=Path)
     parser.add_argument("--archive", required=True, type=Path)
     parser.add_argument("--windows-ml-root", required=True, type=Path)
+    parser.add_argument("--effects-source-root", required=True, type=Path)
     arguments = parser.parse_args()
 
     try:
-        verify_install_tree(arguments.install_root, arguments.windows_ml_root)
-        verify_archive(arguments.archive, arguments.windows_ml_root)
+        verify_install_tree(arguments.install_root, arguments.windows_ml_root, arguments.effects_source_root)
+        verify_archive(arguments.archive, arguments.windows_ml_root, arguments.effects_source_root)
     except PackageContractError as error:
         print(f"package-contract-error: {error}", file=sys.stderr)
         return 1

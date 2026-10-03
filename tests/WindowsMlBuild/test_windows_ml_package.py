@@ -22,6 +22,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = REPOSITORY_ROOT / "scripts" / "verify_windows_ml_package.py"
 PLUGIN_BIN = Path("obs-backgroundremoval/bin/64bit")
 PLUGIN_LICENSES = Path("obs-backgroundremoval/licenses")
+PLUGIN_EFFECTS = Path("obs-backgroundremoval/data/effects")
+GPU_EFFECTS = ("input_downscale.effect", "gpu_mask_processing.effect")
 
 
 def load_verifier_module():
@@ -39,6 +41,7 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.fixture_root = Path(self.temporary_directory.name)
         self.windows_ml_root = self.fixture_root / "windows-ml"
+        self.effects_source_root = self.fixture_root / "effects-source"
         self.install_root = self.fixture_root / "install"
         self.archive = self.fixture_root / "plugin.zip"
         self._create_valid_fixture()
@@ -47,6 +50,108 @@ class WindowsMlPackageTest(unittest.TestCase):
         result = self._verify()
 
         self.assertEqual(result.returncode, 0, self._diagnostic(result))
+
+    def test_gpu_effect_install_tree_missing_empty_changed_are_rejected(self):
+        for name in GPU_EFFECTS:
+            for mutation in ("missing", "empty", "changed"):
+                with self.subTest(name=name, mutation=mutation):
+                    installed = self.install_root / PLUGIN_EFFECTS / name
+                    original = installed.read_bytes()
+                    if mutation == "missing":
+                        installed.unlink()
+                    else:
+                        installed.write_bytes(b"" if mutation == "empty" else b"changed shader")
+                    self._write_archive()
+                    try:
+                        self._assert_entry_error(self._verify(), name)
+                    finally:
+                        installed.write_bytes(original)
+                        self._write_archive()
+
+    def test_gpu_effect_archive_only_missing_empty_changed_are_rejected(self):
+        for name in GPU_EFFECTS:
+            for mutation in ("missing", "empty", "changed"):
+                with self.subTest(name=name, mutation=mutation):
+                    entry_name = (PLUGIN_EFFECTS / name).as_posix()
+                    with zipfile.ZipFile(self.archive) as archive:
+                        entries = {entry.filename: archive.read(entry) for entry in archive.infolist()}
+                    if mutation == "missing":
+                        del entries[entry_name]
+                    else:
+                        entries[entry_name] = b"" if mutation == "empty" else b"changed shader"
+                    with zipfile.ZipFile(self.archive, "w") as archive:
+                        for path, contents in entries.items():
+                            archive.writestr(path, contents)
+                    try:
+                        self._assert_entry_error(self._verify(), name)
+                    finally:
+                        self._write_archive()
+
+    def test_gpu_effect_source_missing_empty_changed_are_rejected(self):
+        for name in GPU_EFFECTS:
+            for mutation in ("missing", "empty", "changed"):
+                with self.subTest(name=name, mutation=mutation):
+                    source = self.effects_source_root / name
+                    original = source.read_bytes()
+                    if mutation == "missing":
+                        source.unlink()
+                    else:
+                        source.write_bytes(b"" if mutation == "empty" else b"changed source")
+                    try:
+                        self._assert_entry_error(self._verify(), name)
+                    finally:
+                        source.write_bytes(original)
+
+    def test_gpu_effect_crlf_drift_is_rejected_without_normalization(self):
+        for name in GPU_EFFECTS:
+            with self.subTest(name=name):
+                installed = self.install_root / PLUGIN_EFFECTS / name
+                original = installed.read_bytes()
+                self.assertIn(b"\n", original)
+                installed.write_bytes(original.replace(b"\n", b"\r\n"))
+                try:
+                    self._assert_entry_error(self._verify(), name)
+                finally:
+                    installed.write_bytes(original)
+
+    def test_effect_source_root_is_mandatory(self):
+        command = self._verify_command()
+        del command[-2:]
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--effects-source-root", result.stderr)
+
+    def test_effect_source_symlink_is_rejected(self):
+        for name in GPU_EFFECTS:
+            with self.subTest(name=name):
+                source = self.effects_source_root / name
+                original = source.read_bytes()
+                redirected = self.fixture_root / name
+                redirected.write_bytes(original)
+                source.unlink()
+                try:
+                    source.symlink_to(redirected)
+                except OSError as error:
+                    source.write_bytes(original)
+                    self.skipTest(f"Filesystem symlink unavailable: {error}")
+                try:
+                    self._assert_entry_error(self._verify(), name)
+                finally:
+                    source.unlink()
+                    source.write_bytes(original)
+
+    def test_effect_source_directory_alias_is_rejected(self):
+        original = self.effects_source_root
+        alias = self.fixture_root / "effects-alias"
+        try:
+            alias.symlink_to(original, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"Filesystem symlink unavailable: {error}")
+        self.effects_source_root = alias
+        result = self._verify()
+        self.assertEqual(result.returncode, 1, self._diagnostic(result))
+        self.assertIn("effects-alias", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_nested_onnxruntime_dll_is_rejected(self):
         nested_runtime = self.install_root / "nested" / "onnxruntime.dll"
@@ -388,6 +493,13 @@ class WindowsMlPackageTest(unittest.TestCase):
         self.assertIn("linked-junction", result.stderr)
 
     def _create_valid_fixture(self):
+        self.effects_source_root.mkdir()
+        effects_directory = self.install_root / PLUGIN_EFFECTS
+        effects_directory.mkdir(parents=True)
+        for name in GPU_EFFECTS:
+            contents = ("independent source shader " + name + "\n").encode()
+            (self.effects_source_root / name).write_bytes(contents)
+            (effects_directory / name).write_bytes(contents)
         native_directory = self.windows_ml_root / "runtimes/win-x64/native"
         native_directory.mkdir(parents=True)
         package_files = {
@@ -451,7 +563,14 @@ class WindowsMlPackageTest(unittest.TestCase):
 
     def _verify(self):
         return subprocess.run(
-            [
+            self._verify_command(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _verify_command(self):
+        return [
                 sys.executable,
                 str(VERIFIER),
                 "--install-root",
@@ -460,11 +579,9 @@ class WindowsMlPackageTest(unittest.TestCase):
                 str(self.archive),
                 "--windows-ml-root",
                 str(self.windows_ml_root),
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+                "--effects-source-root",
+                str(self.effects_source_root),
+            ]
 
     @staticmethod
     def _diagnostic(result):

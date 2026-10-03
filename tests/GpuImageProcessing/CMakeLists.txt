@@ -46,11 +46,14 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
     native-main.cpp
     input-test.cpp
     mask-test.cpp
+    quality-test.cpp
+    filter-boundaries.cpp
     graphics-faults.cpp
     "${GPU_IMAGE_SOURCE_DIR}/gpu-image-policy.cpp"
     "${GPU_IMAGE_SOURCE_DIR}/gpu-input-preprocessor.cpp"
     "${GPU_IMAGE_SOURCE_DIR}/background-mask-cpu.cpp"
     "${GPU_IMAGE_SOURCE_DIR}/gpu-mask-processor.cpp"
+    "${PROJECT_SOURCE_DIR}/src/ort-utils/ort-session-utils.cpp"
   )
   # Source properties are scoped to this tests directory: the plugin's compilation is untouched.
   set_source_files_properties(
@@ -58,12 +61,26 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
     "${GPU_IMAGE_SOURCE_DIR}/gpu-mask-processor.cpp"
     PROPERTIES COMPILE_OPTIONS "/FI${CMAKE_CURRENT_SOURCE_DIR}/graphics-faults.hpp"
   )
-  target_include_directories(gpu-image-processing-native PRIVATE "${GPU_IMAGE_SOURCE_DIR}")
+  if(NOT TARGET opencv_imgcodecs)
+    message(FATAL_ERROR "Native portrait quality requires the existing OpenCV JPEG/imgcodecs module")
+  endif()
+  target_include_directories(
+    gpu-image-processing-native
+    PRIVATE "${GPU_IMAGE_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}"
+  )
   target_compile_features(gpu-image-processing-native PRIVATE cxx_std_20)
   target_link_libraries(
     gpu-image-processing-native
-    PRIVATE BuildOptions OBS::libobs OpenCV::opencv_core OpenCV::opencv_imgproc
+    PRIVATE
+      BuildOptions
+      OBS::libobs
+      OpenCV::opencv_core
+      OpenCV::opencv_imgproc
+      opencv_imgcodecs
+      OnnxRuntimeBackend
+      windows-ml-session-core
   )
+  stage_windows_ml_runtime(gpu-image-processing-native)
   add_custom_command(
     TARGET gpu-image-processing-native
     POST_BUILD
@@ -76,7 +93,8 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
     NAME gpu-image-processing-native
     COMMAND
       gpu-image-processing-native --effect-root "${PROJECT_SOURCE_DIR}/data/effects" --model
-      "${PROJECT_SOURCE_DIR}/data/models/mediapipe.onnx"
+      "${PROJECT_SOURCE_DIR}/data/models/mediapipe.onnx" --portrait
+      "${PROJECT_SOURCE_DIR}/tests/Scenarios/0000-portrait-umireon.jpg"
   )
   set_tests_properties(gpu-image-processing-native PROPERTIES TIMEOUT 300)
 
