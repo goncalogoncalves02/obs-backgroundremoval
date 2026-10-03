@@ -8,7 +8,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, feature/windows-ml-amd-gpu-image-processing]
     tags: ["*"]
 
 concurrency:

@@ -10,4 +10,5 @@ endif()
 
 if(WIN32 AND BUILD_TESTING)
   add_subdirectory(WindowsMlSession)
+  add_subdirectory(GpuImageProcessing)
 endif()
