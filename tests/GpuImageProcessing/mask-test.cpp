@@ -10,6 +10,7 @@
 #include "gpu-mask-processor.hpp"
 #include "background-mask-cpu.hpp"
 #include "graphics-fault-controls.hpp"
+#include "blend-state-probe.hpp"
 #include <opencv2/imgproc.hpp>
 using namespace gpu_image;
 
@@ -113,6 +114,17 @@ void run_mask_cases(const std::filesystem::path &effect_root)
 	MaskSettings settings{};
 	settings.enable_threshold = true;
 	const auto mask = scene();
+	std::cout << "case mask_ignores_and_restores_reverse_subtract_blending" << std::endl;
+	{
+		gpu_test::ReverseSubtractState incoming_blend;
+		settings.smooth_contour = 0.5f;
+		settings.mask_expansion = 2;
+		settings.feather = 0.2f;
+		reference_case(processor, effect, mask, {641, 359}, settings, "reverse_subtract_blending");
+		gpu_test::require_reverse_subtract_restored((effect_root / "input_downscale.effect").string());
+	}
+	settings = {};
+	settings.enable_threshold = true;
 	std::cout << "case thin_edges_and_border_impulses" << std::endl;
 	for (const auto smoothing : {0.001f, 0.2f, 0.5f, 1.0f}) {
 		settings.smooth_contour = smoothing;

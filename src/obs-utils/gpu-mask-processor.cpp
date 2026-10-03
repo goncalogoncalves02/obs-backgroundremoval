@@ -19,6 +19,7 @@ public:
 		  linear_srgb_(gs_get_linear_srgb())
 	{
 		gs_blend_state_push();
+		gs_enable_blending(false);
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 		gs_enable_framebuffer_srgb(false);
 		gs_set_linear_srgb(false);

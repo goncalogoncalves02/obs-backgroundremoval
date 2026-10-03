@@ -18,6 +18,7 @@ public:
 		  linear_srgb_(gs_get_linear_srgb())
 	{
 		gs_blend_state_push();
+		gs_enable_blending(false);
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 		// Legacy cv::resize interpolates encoded BGRA bytes, with no alpha premultiplication.
 		gs_enable_framebuffer_srgb(false);

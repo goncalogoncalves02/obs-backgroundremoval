@@ -3,6 +3,7 @@
 
 #include "gpu-input-preprocessor.hpp"
 #include "graphics-fault-controls.hpp"
+#include "blend-state-probe.hpp"
 #include <opencv2/imgproc.hpp>
 #include <filesystem>
 #include <iostream>
@@ -241,6 +242,13 @@ static void resource_failure_is_controlled(const std::string &effect)
 void run_input_cases(const std::filesystem::path &effect_root)
 {
 	const std::string effect = (effect_root / "input_downscale.effect").string();
+	std::cout << "case input_ignores_and_restores_reverse_subtract_blending" << std::endl;
+	{
+		gpu_test::ReverseSubtractState incoming_blend;
+		gpu_test::require_original_overwrite_scope_corruption(effect);
+		reference_case({641, 359}, false, effect);
+		gpu_test::require_reverse_subtract_restored(effect);
+	}
 	std::cout << "case reduced_readback_preserves_full_texture" << std::endl;
 	reference_case({1280, 720}, false, effect);
 	reference_case({1920, 1080}, false, effect);
