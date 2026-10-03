@@ -13,13 +13,32 @@ This document is the durable entry point for continuing the Windows ML AMD work.
 ## Current repository and branch state
 
 - Repository: `goncalogoncalves02/obs-backgroundremoval`.
-- Durable documentation branch: `GPU`; before this documentation update its head was `0ea4ef13497747dc0ddceb1788ac73eb95967e66`.
+- Durable documentation branch: `GPU`; before this delivery-handoff documentation update its head was `c10f53d2cbd12b3543d64ae07cfe7a0100c3e90f`.
 - Accepted Sprint 6 implementation: `feature/windows-ml-amd-sprint-6`, source `a390fcb4f2f6cdd9beba14e3024edc41b7860cc0`.
 - [PR #2](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/2) remains open and draft, with `windows-only-ci` and `upload-artifacts` at this snapshot.
 - Production-core hardware evidence uses `5f1b52fcb521825014e5dff5d5289ee82a8c66e4`; the later accepted source adds the bounded CPU/DirectML selector/status and Portuguese locale packaging without changing that backend.
 - Accepted Sprint 5 remains on `feature/windows-ml-amd` at `74b0498d197288e54f932b818bb9e857b984db7f`; [PR #1](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/1) remains draft.
 - `main` remains `9772c540279cc84b8c5be5442c50ccb00b399a6e` and has not received either feature. No merge, public release or deployment is recorded.
 - This `GPU` change contains documentation only. Preserve the owner's untracked files, including `.aws`; do not inspect, stage, rewrite or delete them.
+
+## GPU image processing delivery — owner acceptance pending
+
+The owner approved the two-stage Windows + MediaPipe + DirectML design and implementation plan on 2026-10-03. The software implementation and controlled comparison delivery are now verified; the owner's new visual/lifecycle and whole-OBS CPU result have not yet been collected. This extends the accepted inference route with GPU input downscaling and GPU mask resizing/smoothing/expansion/feather. Initial contours remain on the small CPU mask; direct OBS–DirectML memory sharing is deferred. Image Similarity enabled still requires full-size CPU readback.
+
+- Feature branch: `feature/windows-ml-amd-gpu-image-processing`.
+- Final signed source: `8da27a2557c3b89854f48df702888c94557c720d`.
+- [Approved design](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/8da27a2557c3b89854f48df702888c94557c720d/docs/superpowers/specs/2026-10-03-windows-ml-amd-gpu-image-processing-design.md), [implementation plan](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/8da27a2557c3b89854f48df702888c94557c720d/docs/superpowers/plans/2026-10-03-windows-ml-amd-gpu-image-processing.md) and [usage/evidence limits](https://github.com/goncalogoncalves02/obs-backgroundremoval/blob/8da27a2557c3b89854f48df702888c94557c720d/docs/windows-ml-gpu-image-processing.md).
+- Independent task reviews, one whole-source review, its consolidated correction review and a narrowly declared terminal-log-boundary follow-up review are complete. No open source finding remains. Ignored reports and all original/failed receipts are preserved in the existing feature worktree under `.superpowers/sdd/2026-10-03-windows-ml-amd-gpu-image-processing`; do not restart completed tasks or discard evidence.
+- Exact [Windows run 37146350991/job111270993063](https://github.com/goncalogoncalves02/obs-backgroundremoval/actions/runs/37146350991/job/111270993063) and [Check CI 37146350682](https://github.com/goncalogoncalves02/obs-backgroundremoval/actions/runs/37146350682) passed.
+- Native verification includes actual plugin compile/link, policy/packet/shared-comparator tests, software D3D11 graphics, 48 model/portrait quality comparisons, 64 actual filter callback boundaries and four destruction cycles. Windows PowerShell 5.1 executes measurement/collector/real-ZIP transaction faults, including all 17 collector boundary/acquisition cases; generator and exact-source renderer also pass.
+- Across the 48 quality cases: maximum input MAE `0.000970215`, maximum final-mask MAE `0.000119955`, minimum physical retained-alpha IoU `0.999153`, minimum positive-background IoU `0.999823`. Both IoU gates require at least `0.98`; both MAE gates require at most `0.01`. The original model saturation remains unchanged.
+- Eligible full-filter DirectML allocation-failure branches were explicitly unexecuted on the software runner after an actual CPU fallback. These native results do not establish RX 9070 XT execution, hair/motion acceptance or any CPU saving.
+
+Deliver exactly one [reviewed handoff ZIP](https://github.com/goncalogoncalves02/obs-backgroundremoval/actions/runs/37146350991/artifacts/11283076308): `obs-backgroundremoval_gpu-image-processing_x64.zip`, artifact `11283076308`, `59255402` bytes, SHA-256 `f2f474090400a0d8b6ecf8af7c996355806a331d355fb5f72b01bb6d5fda2741`. It contains the unchanged original plugin ZIP and the concrete installer plus comparison script. Original plugin artifact `11282342195`: `59193409` bytes, SHA-256 `19797093a9acc24475d2d2eda7e3fded2aac8e0c7462a88d8b60bd18c7ca91bf`. Both actual downloads match GitHub digests and exact source/run metadata; extracted model/effect/script bytes and the rendered manifest match immutable Git/package bytes. One Windows ML 2.2.12 ONNX Runtime and its API/DirectML/legal files retain their pinned origins. Artifact retention is finite; refresh availability before a future download.
+
+Close OBS and run the extracted installer in administrator PowerShell. It preserves the actual previous tree and receipt outside OBS search paths; `-Acao Restaurar` restores that prior version. Reopen OBS with MediaPipe + GPU DirectML, then run the extracted comparison script. The saved GPU image-processing checkbox defaults OFF; OFF and ON both retain DirectML inference. The script guides OFF → ON → ON → OFF, with 5 seconds settling and 15 seconds actual process-CPU measurement per block, plus bounded post-end log observation separately disclosed. CPU reads use actual acquisition timestamps and logical-processor normalization; late/slow reads, missing closing logs, fallback, changed settings/source/process or incomplete records make the comparison inconclusive. Host timing and OBS telemetry intervals are disclosed separately; unavailable network-drop counters are not invented. No statistically established or substantial saving is promised.
+
+Next action: collect only the owner's sanitized terminal summary and separate visual/motion/lifecycle answers. Keep complete logs local. Record acceptance and measured performance only after those real results exist; the acceptance document remains pending. This delivery handoff is documentation only on `GPU`, with no feature code copied, merge, release, or owner installation performed here.
 
 ## Current acceptance and scope
 
@@ -205,7 +224,7 @@ Only the sanitized plugin lines and necessary hardware/version facts are retaine
 
 ## Next session and remaining gates
 
-1. Reconcile `AGENTS.md`, this handoff, the ignored Sprint 6 ledger, worktrees and diffs. Preserve owner files and the accepted Sprint 5 and Sprint 6 source heads; do not restart completed implementation or hardware checks from historical pending entries.
+1. Reconcile `AGENTS.md`, this handoff, the current GPU image-processing ledger, worktrees and diffs. Preserve owner files, accepted Sprint 5/Sprint 6 heads and the final image-processing source; collect the pending owner comparison summary rather than restarting completed implementation or historical hardware checks.
 2. Verify the signed documentation-only `GPU` publication/readback, live branch heads, PR draft state, exact-SHA CI and artifact availability. Artifact retention is finite.
 3. Continue using MediaPipe with DirectML or CPU on the accepted setup. Consult the immutable UI usage guide and integration record when diagnosing effective-provider status; MIGraphX remains optional without a selector.
 4. Obtain new owner direction and any required design approval before implementing the next sprint or expanding UI/models. This acceptance does not authorize merge, public release or deployment.

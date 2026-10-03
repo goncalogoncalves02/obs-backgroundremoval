@@ -13,7 +13,7 @@ These instructions apply to the entire repository.
 
 - `main` is the upstream integration target and must remain untouched until the Windows ML work is accepted.
 - `GPU` is the owner's durable staging and documentation branch.
-- Feature implementation currently lives on `feature/windows-ml-amd` and is reviewed and tested there before it is brought to `GPU` or `main`.
+- Current GPU image-processing implementation lives on `feature/windows-ml-amd-gpu-image-processing`; accepted earlier work remains on `feature/windows-ml-amd` and `feature/windows-ml-amd-sprint-6`. Feature code is reviewed and tested on its feature branch before it is brought to `GPU` or `main`.
 - Do not copy feature code to `GPU` merely to update documentation or handoff state.
 - The owner has approved pushes to the project branches, including future pushes, provided they remain within the agreed task scope.
 
