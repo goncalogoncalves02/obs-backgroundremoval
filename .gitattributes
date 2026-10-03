@@ -9,3 +9,10 @@ docs/star-history.svg linguist-generated=true merge=ours
 # Byte-exact package/source origin on Windows, independent of core.autocrlf.
 data/effects/input_downscale.effect text eol=lf
 data/effects/gpu_mask_processing.effect text eol=lf
+# Deterministic owner handoff script bytes; PS sources retain their UTF-8 BOM.
+scripts/testar-processamento-gpu.ps1 text eol=lf
+scripts/instalar-processamento-gpu.ps1.in text eol=lf
+scripts/package_gpu_image_handoff.py text eol=lf
+tests/GpuImageProcessing/measurement-test.ps1 text eol=lf
+tests/GpuImageProcessing/collector-test.ps1 text eol=lf
+tests/GpuImageProcessing/installer-test.ps1 text eol=lf

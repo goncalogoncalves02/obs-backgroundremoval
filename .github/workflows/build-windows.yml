@@ -31,6 +31,9 @@ on:
       smoke-tool-artifact:
         description: Windows ML smoke-tool artifact for x64 hardware testing.
         value: ${{ jobs.build.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
+      gpu-image-handoff-artifact:
+        description: Single owner download containing plugin ZIP, installer and comparison script.
+        value: ${{ jobs.build.outputs.HANDOFF_ARTIFACT_NAME }}
 
 env:
   # https://github.com/kaito-tokyo/vcpkg-obs-kaito-tokyo
@@ -45,6 +48,7 @@ jobs:
       DLL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
       SMOKE_TOOL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SMOKE_TOOL_ARTIFACT_NAME }}
       SESSION_CHECK_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.SESSION_CHECK_ARTIFACT_NAME }}
+      HANDOFF_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.HANDOFF_ARTIFACT_NAME }}
 
     env:
       VCPKG_FORCE_DOWNLOADED_BINARIES: '1'
@@ -118,12 +122,14 @@ jobs:
           $DLL_ARTIFACT_NAME = "obs-backgroundremoval_$env:PLUGIN_VERSION.dll.zip"
           $SMOKE_TOOL_ARTIFACT_NAME = "windows-ml-smoke_2.2.12_x64.zip"
           $SESSION_CHECK_ARTIFACT_NAME = "windows-ml-session-check_2.2.12_x64.zip"
+          $HANDOFF_ARTIFACT_NAME = 'obs-backgroundremoval_gpu-image-processing_x64.zip'
           "DLL_ARTIFACT_NAME=$DLL_ARTIFACT_NAME"
           "SMOKE_TOOL_ARTIFACT_NAME=$SMOKE_TOOL_ARTIFACT_NAME"
           "SESSION_CHECK_ARTIFACT_NAME=$SESSION_CHECK_ARTIFACT_NAME"
           Add-Content -Value "DLL_ARTIFACT_NAME=$DLL_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
           Add-Content -Value "SMOKE_TOOL_ARTIFACT_NAME=$SMOKE_TOOL_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
           Add-Content -Value "SESSION_CHECK_ARTIFACT_NAME=$SESSION_CHECK_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          Add-Content -Value "HANDOFF_ARTIFACT_NAME=$HANDOFF_ARTIFACT_NAME" -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
 
       # BEGIN: Set up toolchains
 
@@ -499,6 +505,34 @@ jobs:
             --effects-source-root (Join-Path $env:GITHUB_WORKSPACE 'data/effects')
           if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
+      - name: Test owner comparison and installer (Windows PowerShell 5.1)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          GPU_FIXTURE_ZIP: ${{ github.workspace }}/${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/GpuImageProcessing/measurement-test.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Owner measurement contracts failed.' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/GpuImageProcessing/collector-test.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Owner collector timing/freshness/process tests failed.' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/GpuImageProcessing/installer-test.ps1 -PluginZip $env:GPU_FIXTURE_ZIP
+          if ($LASTEXITCODE -ne 0) { throw 'Actual plugin ZIP/transaction fault tests failed.' }
+          & $env:PYTHON_COMMAND tests/GpuImageProcessing/test_handoff_generator.py
+          if ($LASTEXITCODE -ne 0) { throw 'Single-ZIP handoff generator tests failed.' }
+
+      - name: Package one owner handoff ZIP
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.SOURCE_COMMIT }}
+          DLL_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+          HANDOFF_ARTIFACT_NAME: ${{ steps.expected-artifacts.outputs.HANDOFF_ARTIFACT_NAME }}
+        run: |
+          & $env:PYTHON_COMMAND scripts/package_gpu_image_handoff.py --plugin-zip $env:DLL_ARTIFACT_NAME --template scripts/instalar-processamento-gpu.ps1.in --measurement scripts/testar-processamento-gpu.ps1 --source-sha $env:SOURCE_COMMIT --run-id ${{ github.run_id }} --artifact-name $env:DLL_ARTIFACT_NAME --destination $env:HANDOFF_ARTIFACT_NAME --source-root $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw 'Exact source handoff packaging failed.' }
+          $hash = (Get-FileHash -LiteralPath $env:HANDOFF_ARTIFACT_NAME -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$env:HANDOFF_ARTIFACT_NAME sha256=$hash" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
       - name: Package production session-check artifact and record receipts
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
         env:
@@ -558,5 +592,13 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: ${{ steps.expected-artifacts.outputs.DLL_ARTIFACT_NAME }}
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload one owner handoff ZIP
+        if: inputs.upload-artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ steps.expected-artifacts.outputs.HANDOFF_ARTIFACT_NAME }}
           archive: false
           if-no-files-found: error
