@@ -7,7 +7,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 **Date:** 2026-10-03
 
-**Status:** Scope approved in conversation; written specification awaiting owner review. No implementation approval is recorded by this document.
+**Status:** Written specification approved by the owner on 2026-10-03 (“Aprovo a especificação”) for implementation planning. Product implementation awaits approval of the written plan.
 
 ## Purpose and accepted scope
 
