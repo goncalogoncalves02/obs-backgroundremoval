@@ -12,6 +12,7 @@ void initialize_paths(const std::filesystem::path &effect_root, const std::files
 void load_locale(const char *locale);
 void release_locale();
 std::vector<std::string> captured_logs();
+uint64_t error_count();
 char *module_file(const char *file);
 } // namespace gpu_filter_test
 

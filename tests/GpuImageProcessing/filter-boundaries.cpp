@@ -18,12 +18,13 @@ std::filesystem::path effect_root, model_path;
 lookup_t *locale_lookup = nullptr;
 std::mutex log_mutex;
 std::vector<std::string> logs;
+uint64_t errors = 0;
 } // namespace
 
 const char *PLUGIN_NAME = "obs-backgroundremoval";
 const char *PLUGIN_VERSION = "1.4.1";
 
-extern "C" void obs_log(int, const char *format, ...)
+extern "C" void obs_log(int level, const char *format, ...)
 {
 	std::array<char, 16384> buffer{};
 	va_list args;
@@ -32,6 +33,8 @@ extern "C" void obs_log(int, const char *format, ...)
 	va_end(args);
 	std::lock_guard lock(log_mutex);
 	logs.emplace_back(buffer.data());
+	if (level <= LOG_ERROR)
+		++errors;
 	std::fprintf(stderr, "[filter-native] %s\n", buffer.data());
 	std::fflush(stderr);
 }
@@ -77,6 +80,11 @@ std::vector<std::string> captured_logs()
 {
 	std::lock_guard lock(log_mutex);
 	return logs;
+}
+uint64_t error_count()
+{
+	std::lock_guard lock(log_mutex);
+	return errors;
 }
 char *module_file(const char *file)
 {

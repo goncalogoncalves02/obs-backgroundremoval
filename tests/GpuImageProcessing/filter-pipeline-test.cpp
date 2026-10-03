@@ -5,8 +5,10 @@
 // Execute the actual callback TU and inspect its existing owned lifetime/model.
 // No production hooks, fabricated sessions or graphics replacements are added.
 #include "background-filter.cpp"
+#include "obs-utils/background-mask-cpu.hpp"
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -16,6 +18,120 @@ void check(bool condition, const char *message)
 {
 	if (!condition)
 		throw std::runtime_error(message);
+}
+// A test-only observer of the real MediaPipe implementation. Every operation
+// delegates unchanged base behavior; no synthetic Session, tensors or success.
+// The actual adapter invokes both methods while holding modelMutex. All fixture
+// reads use that same mutex, including reads alongside the OBS video tick thread.
+struct ObservedMediaPipe final : ModelMediaPipe {
+	uint64_t completed_runs = 0, completed_outputs = 0;
+	cv::Mat completed_output;
+	bool run_completed = false;
+
+	void runNetworkInference(const std::unique_ptr<Ort::Session> &session,
+				 const std::vector<Ort::AllocatedStringPtr> &inputNames,
+				 const std::vector<Ort::AllocatedStringPtr> &outputNames,
+				 const std::vector<Ort::Value> &inputTensor,
+				 std::vector<Ort::Value> &outputTensor) override
+	{
+		run_completed = false;
+		// The base intentionally returns without Run for empty bindings. Such
+		// a return is not a successful inference and cannot increment evidence.
+		check(session && !inputNames.empty() && !outputNames.empty() &&
+			      inputNames.size() == inputTensor.size() && outputNames.size() == outputTensor.size(),
+		      "Actual CPU inference bindings cannot execute Session::Run");
+		ModelMediaPipe::runNetworkInference(session, inputNames, outputNames, inputTensor, outputTensor);
+		// This line is reachable only after the real synchronous Run returned.
+		++completed_runs;
+		run_completed = true;
+	}
+	void postprocessOutput(cv::Mat &output) override
+	{
+		check(run_completed, "MediaPipe postprocess has no completed real Session::Run");
+		ModelMediaPipe::postprocessOutput(output);
+		check(!output.empty() && output.dims == 2 && output.type() == CV_32FC1 &&
+			      cv::checkRange(output, true, nullptr, 0.0, 1.00000001),
+		      "Actual MediaPipe output must be finite single-channel probabilities in [0,1]");
+		completed_output = output.clone();
+		++completed_outputs;
+		run_completed = false;
+	}
+};
+void require_completed_cpu_mask(uint64_t completed_runs, uint64_t completed_outputs, const cv::Mat &probabilities,
+				const cv::Mat &displayed, gpu_image::Dimensions output, gpu_image::Dimensions source,
+				const gpu_image::MaskSettings &settings)
+{
+	check(completed_runs > 0 && completed_outputs == completed_runs,
+	      "Actual CPU Session::Run and delegated MediaPipe postprocess did not both complete");
+	check(!probabilities.empty() && probabilities.type() == CV_32FC1 &&
+		      probabilities.cols == static_cast<int>(output.width) &&
+		      probabilities.rows == static_cast<int>(output.height),
+	      "Completed actual output differs from validated model dimensions");
+	check(!displayed.empty() && displayed.type() == CV_8UC1 && displayed.cols == static_cast<int>(source.width) &&
+		      displayed.rows == static_cast<int>(source.height),
+	      "Actual CPU display mask has invalid type or source dimensions");
+	cv::Mat bytes;
+	probabilities.convertTo(bytes, CV_8U, 255.0);
+	// The deterministic baseline never changes input/settings; repeated temporal
+	// histories therefore equal the same threshold result. Use the already
+	// validated retained CPU reference, without bypassing actual callback work.
+	const auto small = gpu_image::prepare_small_mask(bytes, {}, settings);
+	const auto expected = gpu_image::finish_mask_cpu(small.mask, source, settings);
+	check(cv::norm(displayed, expected, cv::NORM_INF) == 0.0,
+	      "Actual callback display mask differs from completed inference CPU reference");
+}
+// Schedule baseline capture/tick/render serially on the actual OBS video thread.
+// Rendering graphics scopes end before invoking the production tick callback.
+void draw(obs_source_t *source);
+struct BaselineTick {
+	void *filter_data;
+	obs_source_t *source;
+	BaselineTick(void *data, obs_source_t *target) : filter_data(data), source(target) {}
+	std::atomic<bool> pending{true};
+	std::promise<void> done;
+};
+void baseline_tick(void *data, float seconds)
+{
+	auto &request = *static_cast<BaselineTick *>(data);
+	if (!request.pending.exchange(false))
+		return;
+	try {
+		draw(request.source);
+		const auto tf = *static_cast<std::shared_ptr<background_removal_filter> *>(request.filter_data);
+		{
+			std::lock_guard lock(tf->inputBGRALock);
+			check(!tf->inputBGRA.empty(), "Actual baseline filter did not capture source pixels");
+		}
+		background_filter_video_tick(request.filter_data, seconds);
+		draw(request.source);
+		request.done.set_value();
+	} catch (...) {
+		request.done.set_exception(std::current_exception());
+	}
+}
+void tick_baseline_on_obs_thread(void *filter_data, obs_source_t *source)
+{
+	BaselineTick request{filter_data, source};
+	auto completion = request.done.get_future();
+	obs_add_tick_callback(baseline_tick, &request);
+	const auto result = completion.wait_for(std::chrono::seconds(10));
+	// OBS removes under its callback mutex, so the stack-owned request remains
+	// alive until a running callback has exited even on the timeout path.
+	obs_remove_tick_callback(baseline_tick, &request);
+	check(result == std::future_status::ready, "Actual OBS baseline tick did not finish");
+	completion.get();
+}
+void initialized_mask_is_not_completion()
+{
+	bool rejected = false;
+	try {
+		require_completed_cpu_mask(0, 0, {}, cv::Mat(181, 321, CV_8UC1, cv::Scalar(255)), {256, 144},
+					   {321, 181}, {});
+	} catch (const std::runtime_error &) {
+		rejected = true;
+	}
+	check(rejected, "Initialized fallback mask must not prove actual CPU inference completion");
+	std::cout << "filter-baseline guard-regression initialized255-without-Run=rejected" << std::endl;
 }
 struct GraphicsScope {
 	GraphicsScope() { obs_enter_graphics(); }
@@ -186,6 +302,7 @@ void run_lifetimes()
 			obs_source_filter_add(source, filter);
 			attached = true;
 			auto tf = instance(filter);
+			ObservedMediaPipe *observer = nullptr;
 			{
 				std::lock_guard lock(tf->modelMutex);
 				check(tf->session &&
@@ -193,21 +310,40 @@ void run_lifetimes()
 				      "Actual MediaPipe CPU adapter session did not become Ready");
 				check(tf->sessionDiagnostics.effective_provider == "CPUExecutionProvider",
 				      "CPU baseline provider inaccurate");
+				check(dynamic_cast<ModelMediaPipe *>(tf->model.get()) != nullptr,
+				      "Actual baseline model is not MediaPipe");
+				auto observing_model = std::make_unique<ObservedMediaPipe>();
+				observer = observing_model.get();
+				tf->model = std::move(observing_model);
 			}
 			std::cout
 				<< "filter-baseline actual-OBS-startup=ready actual-CPU-session=ready actual-filter-render begin"
 				<< std::endl;
-			draw(source);
+			const auto errors_before = gpu_filter_test::error_count();
+			tick_baseline_on_obs_thread(obs_obj_get_data(filter), source);
+			uint64_t completed_runs, completed_outputs;
+			cv::Mat actual_probabilities, actual_mask;
+			gpu_image::Dimensions output_dimensions;
+			gpu_image::MaskSettings mask_settings;
 			{
-				std::lock_guard lock(tf->inputBGRALock);
-				check(!tf->inputBGRA.empty(), "Actual baseline filter did not capture source pixels");
+				std::lock_guard lock(tf->modelMutex);
+				completed_runs = observer->completed_runs;
+				completed_outputs = observer->completed_outputs;
+				actual_probabilities = observer->completed_output.clone();
+				output_dimensions = {static_cast<uint32_t>(tf->outputDims.at(0).at(2)),
+						     static_cast<uint32_t>(tf->outputDims.at(0).at(1))};
+				mask_settings = {tf->enableThreshold, tf->threshold,     tf->temporalSmoothFactor,
+						 tf->contourFilter,   tf->smoothContour, tf->feather,
+						 tf->maskExpansion};
 			}
-			background_filter_video_tick(obs_obj_get_data(filter), 1.0f / 30.0f);
 			{
 				std::lock_guard lock(tf->outputLock);
-				check(!tf->backgroundMask.empty(), "Actual CPU inference did not produce a mask");
+				actual_mask = tf->backgroundMask.clone();
 			}
-			draw(source);
+			require_completed_cpu_mask(completed_runs, completed_outputs, actual_probabilities, actual_mask,
+						   output_dimensions, {321, 181}, mask_settings);
+			check(gpu_filter_test::error_count() == errors_before,
+			      "Actual CPU baseline emitted a plugin error");
 			std::cout << "filter-baseline actual-filter-render=completed actual-CPU-inference=completed"
 				  << std::endl;
 			require_checkbox(filter, settings);
@@ -308,6 +444,7 @@ int main(int argc, char **argv)
 		std::cout << "filter-core graphics=" << module_name << " reset begin" << std::endl;
 		check(obs_reset_video(&video) == OBS_VIDEO_SUCCESS, "Actual OBS graphics/video initialization failed");
 		register_sources();
+		initialized_mask_is_not_completion();
 		run_lifetimes();
 		obs_shutdown();
 		started = false;
