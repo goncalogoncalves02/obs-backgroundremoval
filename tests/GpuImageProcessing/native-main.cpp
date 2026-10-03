@@ -9,6 +9,7 @@
 #include <string>
 
 void run_input_cases(const std::filesystem::path &effect_root);
+void run_mask_cases(const std::filesystem::path &effect_root);
 
 static bool print_adapter(void *, const char *name, uint32_t id)
 {
@@ -57,6 +58,7 @@ int main(int argc, char **argv)
 		if (gs_get_cull_mode() != GS_NEITHER)
 			throw std::runtime_error("Native fixture could not establish OBS 2D draw state");
 		run_input_cases(effect_root);
+		run_mask_cases(effect_root);
 		gs_end_scene();
 		scene_started = false;
 		gs_leave_context();

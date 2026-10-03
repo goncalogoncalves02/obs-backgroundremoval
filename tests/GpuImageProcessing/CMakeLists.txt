@@ -34,10 +34,18 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
   add_test(NAME gpu-image-pipeline COMMAND gpu-image-pipeline)
   set_tests_properties(gpu-image-pipeline PROPERTIES TIMEOUT 60)
 
+  add_executable(gpu-image-mask-reference mask-reference-test.cpp)
+  target_include_directories(gpu-image-mask-reference PRIVATE "${GPU_IMAGE_SOURCE_DIR}")
+  target_compile_features(gpu-image-mask-reference PRIVATE cxx_std_20)
+  target_link_libraries(gpu-image-mask-reference PRIVATE BuildOptions OpenCV::opencv_core OpenCV::opencv_imgproc)
+  add_test(NAME gpu-image-mask-reference COMMAND gpu-image-mask-reference)
+  set_tests_properties(gpu-image-mask-reference PROPERTIES TIMEOUT 60)
+
   add_executable(
     gpu-image-processing-native
     native-main.cpp
     input-test.cpp
+    mask-test.cpp
     graphics-faults.cpp
     "${GPU_IMAGE_SOURCE_DIR}/gpu-image-policy.cpp"
     "${GPU_IMAGE_SOURCE_DIR}/gpu-input-preprocessor.cpp"
