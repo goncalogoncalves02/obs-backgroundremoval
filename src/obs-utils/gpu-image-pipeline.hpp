@@ -39,7 +39,7 @@ struct ProcessingSnapshot {
 	std::string reason;
 };
 
-// Publication and reads clone pixel storage under the mailbox lock. Returned packets may be
+// Publication and reads clone pixels outside the mailbox lock using immutable owned snapshots. Returned packets may be
 // mutated by consumers without changing the stored snapshot; caller buffers must stay stable
 // for the duration of a publication call.
 class ImagePipeline {

@@ -6,6 +6,9 @@
 // No production hooks, fabricated sessions or graphics replacements are added.
 #include "background-filter.cpp"
 #include "obs-utils/background-mask-cpu.hpp"
+#include "graphics-fault-controls.hpp"
+#include <functional>
+#include <map>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -67,7 +70,14 @@ void raw_output_regression()
 // delegates unchanged base behavior; no synthetic Session, tensors or success.
 // The actual adapter invokes both methods while holding modelMutex. All fixture
 // reads use that same mutex, including reads alongside the OBS video tick thread.
+struct BlockedRun {
+	std::atomic<bool> pending{true};
+	std::promise<void> entered;
+	std::promise<void> release;
+};
 struct ObservedMediaPipe final : ModelMediaPipe {
+	std::shared_ptr<BlockedRun> block;
+	std::atomic<unsigned> active_runs{0}, maximum_runs{0};
 	uint64_t completed_runs = 0, completed_outputs = 0;
 	cv::Mat completed_output;
 	bool run_completed = false;
@@ -78,6 +88,18 @@ struct ObservedMediaPipe final : ModelMediaPipe {
 				 const std::vector<Ort::Value> &inputTensor,
 				 std::vector<Ort::Value> &outputTensor) override
 	{
+		const auto concurrent = ++active_runs;
+		maximum_runs.store(std::max(maximum_runs.load(), concurrent));
+		struct ExitRun {
+			std::atomic<unsigned> &count;
+			~ExitRun() { --count; }
+		} exit{active_runs};
+		if (block && block->pending.exchange(false)) {
+			block->entered.set_value();
+			check(block->release.get_future().wait_for(std::chrono::seconds(10)) ==
+				      std::future_status::ready,
+			      "Blocked real inference was not released");
+		}
 		run_completed = false;
 		// The base intentionally returns without Run for empty bindings. Such
 		// a return is not a successful inference and cannot increment evidence.
@@ -183,6 +205,41 @@ void tick_baseline_on_obs_thread(void *filter_data, obs_source_t *source)
 	obs_remove_tick_callback(baseline_tick, &request);
 	check(result == std::future_status::ready, "Actual OBS baseline tick did not finish");
 	completion.get();
+}
+struct SerialAction {
+	std::function<void()> action;
+	std::atomic<bool> pending{true};
+	std::promise<void> done;
+	explicit SerialAction(std::function<void()> operation) : action(std::move(operation)) {}
+};
+void serial_action(void *data, float)
+{
+	auto &request = *static_cast<SerialAction *>(data);
+	if (!request.pending.exchange(false))
+		return;
+	try {
+		request.action();
+		request.done.set_value();
+	} catch (...) {
+		request.done.set_exception(std::current_exception());
+	}
+}
+void on_obs_thread(std::function<void()> action)
+{
+	SerialAction request{std::move(action)};
+	auto complete = request.done.get_future();
+	obs_add_tick_callback(serial_action, &request);
+	const auto result = complete.wait_for(std::chrono::seconds(15));
+	obs_remove_tick_callback(serial_action, &request);
+	check(result == std::future_status::ready, "Serial actual OBS callback timed out");
+	complete.get();
+}
+void process_frame(obs_source_t *filter, obs_source_t *source)
+{
+	on_obs_thread([&] {
+		draw(source);
+		background_filter_video_tick(obs_obj_get_data(filter), 1.0f / 30.0f);
+	});
 }
 void initialized_mask_is_not_completion()
 {
@@ -342,6 +399,333 @@ void require_checkbox(obs_source_t *filter, obs_data_t *settings)
 	obs_properties_destroy(properties);
 	gpu_filter_test::load_locale("en-US");
 }
+void require_processing_truth(const std::shared_ptr<background_removal_filter> &tf, bool requested)
+{
+	std::lock_guard modelLock(tf->modelMutex);
+	std::lock_guard stateLock(tf->imageStateMutex);
+	const auto snapshot = tf->imagePipeline.processing_snapshot();
+	check(snapshot.requested == requested, "Saved processing request and immutable snapshot differ");
+	if (tf->sessionDiagnostics.effective_provider != "DmlExecutionProvider")
+		check(!snapshot.preprocess_active && !snapshot.mask_active &&
+			      snapshot.state != gpu_image::ProcessingState::Active,
+		      "Actual CPU fallback claimed active GPU image processing");
+}
+cv::Mat display_pixels(gs_texture_t *texture)
+{
+	check(texture && gs_texture_get_color_format(texture) == GS_BGRA, "Actual GPU display texture format invalid");
+	const auto width = gs_texture_get_width(texture), height = gs_texture_get_height(texture);
+	auto *stage = gs_stagesurface_create(width, height, GS_BGRA);
+	check(stage != nullptr, "Actual display readback allocation failed");
+	gs_stage_texture(stage, texture);
+	uint8_t *data;
+	uint32_t pitch;
+	if (!gs_stagesurface_map(stage, &data, &pitch)) {
+		gs_stagesurface_destroy(stage);
+		throw std::runtime_error("Actual display readback map failed");
+	}
+	cv::Mat copy;
+	try {
+		copy = cv::Mat(static_cast<int>(height), static_cast<int>(width), CV_8UC4, data, pitch).clone();
+	} catch (...) {
+		gs_stagesurface_unmap(stage);
+		gs_stagesurface_destroy(stage);
+		throw;
+	}
+	gs_stagesurface_unmap(stage);
+	gs_stagesurface_destroy(stage);
+	return copy;
+}
+void require_telemetry(const std::shared_ptr<background_removal_filter> &tf)
+{
+	const auto initial = gpu_filter_test::captured_logs().size();
+	// Fresh real five-second emission, never an artificial timer or made-up counter.
+	const auto deadline = ProcessingClock::now() + std::chrono::seconds(7);
+	std::string record;
+	while (ProcessingClock::now() < deadline) {
+		on_obs_thread([&] {
+			auto retained = tf;
+			background_filter_video_tick(&retained, 1.0f / 30.0f);
+		});
+		const auto logs = gpu_filter_test::captured_logs();
+		for (size_t index = initial; index < logs.size(); ++index)
+			if (logs[index].starts_with("GPUImageProcessing stats "))
+				record = logs[index];
+		if (!record.empty())
+			break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	check(!record.empty(), "Fresh five-second stats emission missing");
+	std::istringstream tokens(record);
+	std::map<std::string, std::string> fields;
+	std::string token;
+	while (tokens >> token) {
+		const auto split = token.find('=');
+		if (split != std::string::npos)
+			fields[token.substr(0, split)] = token.substr(split + 1);
+	}
+	for (const auto *key : {"processing_version",
+				"filter_id",
+				"settings_fingerprint",
+				"source_fingerprint",
+				"generation",
+				"frame_id",
+				"requested",
+				"state",
+				"effective_inference",
+				"preprocess_active",
+				"mask_active",
+				"similarity_full_readback",
+				"source_width",
+				"source_height",
+				"input_width",
+				"input_height",
+				"reason",
+				"fps_num",
+				"fps_den",
+				"processed",
+				"skipped",
+				"stale",
+				"input_readback_pixels",
+				"similarity_readback_pixels",
+				"capture_host_elapsed_ms",
+				"inference_host_elapsed_ms",
+				"mask_host_elapsed_ms",
+				"interval_host_elapsed_ms",
+				"obs_counters_available",
+				"obs_rendered_frames",
+				"obs_lagged_frames"})
+		check(fields.contains(key) && !fields[key].empty(),
+		      "Versioned telemetry has missing/unparseable required field");
+	check(fields["processing_version"] == "1" && std::stoull(fields["filter_id"]) == tf->imageFilterId &&
+		      std::stod(fields["interval_host_elapsed_ms"]) >= 5000.0,
+	      "Telemetry version/lifetime/five-second interval invalid");
+	check(fields["settings_fingerprint"].size() == 16 && fields["source_fingerprint"].size() == 16,
+	      "Telemetry leaked raw settings/source identity instead of fingerprints");
+	check(fields["fps_num"] == "30" && fields["fps_den"] == "1" && fields["obs_counters_available"] == "1",
+	      "Telemetry FPS/OBS availability differs from actual fixture");
+	std::cout << "filter-telemetry real-five-second version=1 parsed-FPS/counters/fingerprints PASS" << std::endl;
+}
+void semantic_cases(obs_source_t *filter, obs_source_t *source, obs_data_t *settings,
+		    const std::shared_ptr<background_removal_filter> &tf)
+{
+	obs_data_set_bool(settings, "gpu_image_processing", false);
+	const auto offHash = image_settings_fingerprint(settings);
+	obs_data_set_bool(settings, "gpu_image_processing", true);
+	check(image_settings_fingerprint(settings) == offHash,
+	      "Optimization checkbox contaminated comparison fingerprint");
+	obs_data_set_bool(settings, "enable_image_similarity", false);
+	obs_data_set_int(settings, "mask_every_x_frames", 1);
+	background_filter_update(obs_obj_get_data(filter), settings);
+	ObservedMediaPipe *observer;
+	{
+		std::lock_guard modelLock(tf->modelMutex);
+		auto model = std::make_unique<ObservedMediaPipe>();
+		observer = model.get();
+		tf->model = std::move(model);
+	}
+	process_frame(filter, source);
+	require_processing_truth(tf, true);
+	// Real synchronous Session::Run is blocked while graphics resize publishes new authority.
+	auto block = std::make_shared<BlockedRun>();
+	auto entered = block->entered.get_future();
+	{
+		std::lock_guard modelLock(tf->modelMutex);
+		observer->block = block;
+	}
+	uint64_t oldGeneration, staleBefore;
+	gpu_image::FrameStamp oldStamp;
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		const auto config = tf->imagePipeline.snapshot();
+		oldGeneration = config.generation;
+		oldStamp = {config.generation, tf->imageFrameId + 1, config.source, config.input};
+		staleBefore = tf->imageTelemetry.stale;
+	}
+	auto worker = std::async(std::launch::async, [&] { process_frame(filter, source); });
+	if (entered.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+		block->release.set_value();
+		worker.get();
+		throw std::runtime_error("Real blocked Session::Run did not start");
+	}
+	try {
+		auto *pixels = static_cast<SourceFixture *>(obs_obj_get_data(source));
+		pixels->width = 641;
+		pixels->height = 359;
+		draw(source); // Graphics never waits for modelMutex held by blocked real inference.
+		{
+			std::lock_guard stateLock(tf->imageStateMutex);
+			const auto config = tf->imagePipeline.snapshot();
+			check(config.generation > oldGeneration && config.source == gpu_image::Dimensions{641, 359},
+			      "Resize did not advance source authority while Run was blocked");
+			gpu_image::MaskPacket late{oldStamp, cv::Mat(144, 256, CV_8UC1, cv::Scalar(0)), true};
+			check(!tf->imagePipeline.publish_mask(late), "Source resize accepted an old-generation packet");
+			check(!tf->legacyMask, "Source resize retained an old-source legacy mask");
+		}
+	} catch (...) {
+		block->release.set_value();
+		worker.get();
+		throw;
+	}
+	block->release.set_value();
+	worker.get();
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		check(tf->imageTelemetry.stale > staleBefore, "Blocked stale real output was not rejected");
+	}
+	process_frame(filter, source);
+	// Full-image PSNR and uncontoured history do not advance on identical-image skips.
+	obs_data_set_bool(settings, "enable_image_similarity", true);
+	background_filter_update(obs_obj_get_data(filter), settings);
+	process_frame(filter, source);
+	cv::Mat history;
+	uint64_t skipped, runs;
+	{
+		std::lock_guard modelLock(tf->modelMutex);
+		runs = observer->completed_runs;
+		std::lock_guard stateLock(tf->imageStateMutex);
+		history = tf->imageHistory.clone();
+		skipped = tf->imageTelemetry.skipped;
+	}
+	process_frame(filter, source);
+	{
+		std::lock_guard modelLock(tf->modelMutex);
+		check(observer->completed_runs == runs, "Similarity skip executed another real inference");
+		std::lock_guard stateLock(tf->imageStateMutex);
+		check(tf->imageTelemetry.skipped > skipped && !history.empty() &&
+			      cv::norm(history, tf->imageHistory, cv::NORM_INF) == 0.0,
+		      "Similarity skip advanced temporal history");
+		check(tf->imagePipeline.snapshot().image_similarity &&
+			      obs_data_get_bool(settings, "enable_image_similarity"),
+		      "Full-image compatibility rewrote the saved similarity setting");
+		if (tf->imageEffectiveProvider == "DmlExecutionProvider")
+			check(tf->imagePipeline.processing_snapshot().similarity_full_readback,
+			      "Active similarity route failed to disclose full-image readback");
+	}
+	obs_data_set_bool(settings, "enable_image_similarity", false);
+	obs_data_set_int(settings, "mask_every_x_frames", 3);
+	background_filter_update(obs_obj_get_data(filter), settings);
+	// Two intentional skips, then one real mask, then reuse of that accepted current-generation mask.
+	process_frame(filter, source);
+	process_frame(filter, source);
+	process_frame(filter, source);
+	{
+		std::lock_guard modelLock(tf->modelMutex);
+		runs = observer->completed_runs;
+		std::lock_guard stateLock(tf->imageStateMutex);
+		history = tf->imageHistory.clone();
+	}
+	process_frame(filter, source);
+	{
+		std::lock_guard modelLock(tf->modelMutex);
+		check(observer->completed_runs == runs && observer->maximum_runs == 1,
+		      "Mask-every-X reused frame ran inference or concurrent Run occurred");
+		std::lock_guard stateLock(tf->imageStateMutex);
+		check(!history.empty() && cv::norm(history, tf->imageHistory, cv::NORM_INF) == 0.0,
+		      "Mask-every-X skip changed temporal history");
+	}
+	bool eligible;
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		eligible = tf->imageEffectiveProvider == "DmlExecutionProvider";
+	}
+	if (eligible) {
+		obs_data_set_int(settings, "mask_every_x_frames", 1);
+		background_filter_update(obs_obj_get_data(filter), settings);
+		process_frame(filter, source);
+		process_frame(filter, source);
+		cv::Mat acceptedDisplay;
+		on_obs_thread([&] {
+			GraphicsScope graphics;
+			acceptedDisplay = display_pixels(tf->imageDisplayTexture);
+			tf->imageMaskProcessor.release(); // Borrowed helper output is now invalid.
+			check(cv::norm(acceptedDisplay, display_pixels(tf->imageDisplayTexture), cv::NORM_INF) == 0.0,
+			      "Display cache retained a borrowed helper texture");
+		});
+		Ort::Session *session;
+		{
+			std::lock_guard modelLock(tf->modelMutex);
+			session = tf->session.get();
+		}
+		// The borrowed helper result must not be the recovery display cache.
+		on_obs_thread([&] {
+			GraphicsScope graphics;
+			check(tf->imageDisplayTexture != nullptr, "Accepted independent display copy missing");
+			gpu_test::fail_next_upload_map();
+		});
+		process_frame(filter, source);
+		on_obs_thread([&] {
+			GraphicsScope graphics;
+			check(cv::norm(acceptedDisplay, display_pixels(tf->imageDisplayTexture), cv::NORM_INF) == 0.0,
+			      "Processing recovery lost the independently owned accepted display");
+		});
+		{
+			std::lock_guard modelLock(tf->modelMutex);
+			check(tf->session.get() == session, "Processing failure recreated DirectML session");
+			std::lock_guard stateLock(tf->imageStateMutex);
+			const auto snapshot = tf->imagePipeline.processing_snapshot();
+			check(snapshot.state == gpu_image::ProcessingState::CpuProcessingFallback &&
+				      !snapshot.preprocess_active && !snapshot.mask_active && snapshot.requested,
+			      "Mask map failure did not disable both stages truthfully");
+		}
+		process_frame(filter, source);
+		{
+			std::lock_guard stateLock(tf->imageStateMutex);
+			check(tf->legacyMask && !tf->legacyMask->mask.empty(),
+			      "Processing fallback did not finish a legacy CPU mask outside the mailbox");
+		}
+		// Checkbox changes alone neither clear the failure latch nor recreate inference.
+		obs_data_set_bool(settings, "gpu_image_processing", false);
+		background_filter_update(obs_obj_get_data(filter), settings);
+		obs_data_set_bool(settings, "gpu_image_processing", true);
+		background_filter_update(obs_obj_get_data(filter), settings);
+		process_frame(filter, source);
+		{
+			std::lock_guard modelLock(tf->modelMutex);
+			check(tf->session.get() == session, "Failure checkbox toggle recreated valid inference");
+		}
+		{
+			std::lock_guard stateLock(tf->imageStateMutex);
+			check(tf->imagePipeline.processing_snapshot().state ==
+				      gpu_image::ProcessingState::CpuProcessingFallback,
+			      "Automatic per-frame processing retry cleared failure latch");
+		}
+		// Explicit inference reinitialization is the sole retry path.
+		obs_data_set_int(settings, "numThreads", 2);
+		background_filter_update(obs_obj_get_data(filter), settings);
+		on_obs_thread([&] {
+			GraphicsScope graphics;
+			gpu_test::fail_next_map();
+			draw(source);
+		});
+		{
+			std::lock_guard stateLock(tf->imageStateMutex);
+			check(tf->imagePipeline.processing_snapshot().state ==
+				      gpu_image::ProcessingState::CpuProcessingFallback,
+			      "Input map failure did not enter bounded CPU processing recovery");
+		}
+		obs_data_set_int(settings, "numThreads", 3);
+		background_filter_update(obs_obj_get_data(filter), settings);
+		on_obs_thread([&] {
+			GraphicsScope graphics;
+			tf->imagePreprocessor.release();
+			gpu_test::fail_next_staging_allocation();
+			draw(source);
+		});
+		{
+			std::lock_guard stateLock(tf->imageStateMutex);
+			check(tf->imagePipeline.processing_snapshot().state ==
+				      gpu_image::ProcessingState::CpuProcessingFallback,
+			      "GPU preparation allocation failure did not retain bounded CPU processing fallback");
+		}
+		std::cout << "filter-GPU-eligible actual-input/mask-failure/latch/recovery PASS" << std::endl;
+	} else {
+		std::cout
+			<< "filter-GPU-eligible failure-injection/active-stage-integration=hardware-pending actual-provider=CPUExecutionProvider"
+			<< std::endl;
+	}
+	std::cout << "filter-semantics actual-blocked-Run-resize/stale-rejection/similarity-history/mask-X PASS"
+		  << std::endl;
+}
 void run_lifetimes()
 {
 	unsigned boundaries = 0;
@@ -427,6 +811,15 @@ void run_lifetimes()
 						<< "filter-eligible-GPU coverage=hardware-pending reason=actual-provider-unavailable"
 						<< std::endl;
 			}
+			if (cycle == 0)
+				semantic_cases(filter, source, settings, tf);
+			// Keep each mixed boundary on the actual OBS video thread.
+			obs_data_set_int(settings, "mask_every_x_frames", 1);
+			obs_data_set_bool(settings, "enable_image_similarity", false);
+			{
+				std::lock_guard modelLock(tf->modelMutex);
+				original_session = tf->session.get();
+			}
 			for (unsigned step = 0; step < 16; ++step) {
 				std::cout << "filter-boundary cycle=" << cycle << " step=" << step << std::endl;
 				obs_data_set_bool(settings, "gpu_image_processing", (step % 2) != 0);
@@ -439,13 +832,14 @@ void run_lifetimes()
 				auto *pixels = static_cast<SourceFixture *>(obs_obj_get_data(source));
 				pixels->width = step % 2 ? 641 : 321;
 				pixels->height = step % 2 ? 359 : 181;
-				draw(source);
-				background_filter_video_tick(obs_obj_get_data(filter), 1.0f / 30.0f);
-				draw(source);
+				process_frame(filter, source);
+				require_processing_truth(tf, (step % 2) != 0);
 				check(obs_data_get_bool(settings, "gpu_image_processing") == ((step % 2) != 0),
 				      "Saved request was rewritten");
 				++boundaries;
 			}
+			if (cycle == 0)
+				require_telemetry(tf);
 			obs_data_set_string(settings, "useGPU", USEGPU_CPU);
 			background_filter_update(obs_obj_get_data(filter), settings);
 			{
@@ -458,9 +852,24 @@ void run_lifetimes()
 			obs_source_release(filter);
 			filter = nullptr;
 			check(obs_wait_for_destroy_queue(), "OBS destroy queue did not drain");
+			{
+				std::lock_guard stateLock(tf->imageStateMutex);
+				const auto config = tf->imagePipeline.snapshot();
+				check(tf->imageTerminal, "Removal did not invalidate legacy callback authority");
+				gpu_image::MaskPacket late{{config.generation, tf->imageFrameId + 1, config.source,
+							    config.input},
+							   cv::Mat(144, 256, CV_8UC1, cv::Scalar(0)),
+							   true};
+				check(!tf->imagePipeline.publish_mask(late),
+				      "Terminal same-generation pipeline accepted a late mask");
+			}
 			check(tf->isDisabled, "Removal did not disable the retained callback lifetime");
 			// A retained shared lifetime is valid; an OBS-owned void* deleted at destroy is not.
 			background_filter_video_tick(&tf, 1.0f / 30.0f);
+			{
+				GraphicsScope graphics;
+				background_filter_video_render(&tf, nullptr);
+			}
 			check(tf->isDisabled, "Late retained callback revived a removed filter");
 		} catch (...) {
 			if (filter) {

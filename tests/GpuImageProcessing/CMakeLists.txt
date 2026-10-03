@@ -84,6 +84,11 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
     gpu-image-filter-lifecycle
     filter-pipeline-test.cpp
     filter-boundaries.cpp
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-image-policy.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-image-pipeline.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-input-preprocessor.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-mask-processor.cpp"
+    graphics-faults.cpp
     "${GPU_IMAGE_SOURCE_DIR}/background-mask-cpu.cpp"
     "${PROJECT_SOURCE_DIR}/src/ort-utils/ort-session-utils.cpp"
     "${GPU_IMAGE_SOURCE_DIR}/obs-utils.cpp"

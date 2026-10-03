@@ -25,6 +25,9 @@
 
 #include <opencv2/imgproc.hpp>
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
 #include <numeric>
 #include <memory>
 #include <exception>
@@ -50,11 +53,80 @@
 #include "consts.h"
 #ifdef _WIN32
 #include "obs-utils/windows-ml-status.hpp"
+#include "obs-utils/gpu-image-status.hpp"
+#include "obs-utils/gpu-input-preprocessor.hpp"
+#include "obs-utils/gpu-mask-processor.hpp"
+#include "obs-utils/background-mask-cpu.hpp"
+#endif
+
+#ifdef _WIN32
+namespace image_filter_detail {
+using ProcessingClock = std::chrono::steady_clock;
+struct ImageRenderSettings {
+	int64_t blur = 0;
+	bool focal = false;
+	float focus_point = 0.1f, focus_depth = 0.0f;
+};
+struct ImageTelemetry {
+	uint64_t processed = 0, skipped = 0, stale = 0, frames = 0;
+	uint64_t input_pixels = 0, similarity_pixels = 0;
+	double capture_ms = 0, inference_ms = 0, mask_ms = 0;
+	ProcessingClock::time_point since = ProcessingClock::now();
+};
+uint64_t image_hash(std::string_view text, uint64_t hash = 14695981039346656037ULL)
+{
+	for (unsigned char character : text) {
+		hash ^= character;
+		hash *= 1099511628211ULL;
+	}
+	return hash;
+}
+std::string image_hash_text(uint64_t hash)
+{
+	std::ostringstream text;
+	text << std::hex << std::setw(16) << std::setfill('0') << hash;
+	return text.str();
+}
+std::string image_settings_fingerprint(obs_data_t *settings)
+{
+	// Include saved and default settings, except the comparison's single varied control.
+	obs_data_t *copy = obs_data_create_from_json(obs_data_get_json_with_defaults(settings));
+	if (!copy)
+		throw std::bad_alloc();
+	obs_data_erase(copy, "gpu_image_processing");
+	const auto hash = image_hash(obs_data_get_json(copy));
+	obs_data_release(copy);
+	return image_hash_text(hash);
+}
+const char *image_state_name(gpu_image::ProcessingState state)
+{
+	switch (state) {
+	case gpu_image::ProcessingState::Off:
+		return "Off";
+	case gpu_image::ProcessingState::Pending:
+		return "Pending";
+	case gpu_image::ProcessingState::PreprocessOnly:
+		return "PreprocessOnly";
+	case gpu_image::ProcessingState::Active:
+		return "Active";
+	case gpu_image::ProcessingState::Unavailable:
+		return "Unavailable";
+	case gpu_image::ProcessingState::CpuProcessingFallback:
+		return "CpuProcessingFallback";
+	}
+	return "Unavailable";
+}
+double image_elapsed_ms(ProcessingClock::time_point start)
+{
+	return std::chrono::duration<double, std::milli>(ProcessingClock::now() - start).count();
+}
+} // namespace image_filter_detail
+using namespace image_filter_detail;
 #endif
 
 struct background_removal_filter : public filter_data, public std::enable_shared_from_this<background_removal_filter> {
 	bool enableThreshold = true;
-	bool stopWhenSourceIsInactive = true;
+	std::atomic<bool> stopWhenSourceIsInactive{true};
 	float threshold = 0.5f;
 	cv::Scalar backgroundColor{0, 0, 0, 0};
 	float contourFilter = 0.05f;
@@ -79,6 +151,32 @@ struct background_removal_filter : public filter_data, public std::enable_shared
 	gs_effect_t *kawaseBlurEffect;
 
 	std::mutex modelMutex;
+#ifdef _WIN32
+	// State is acquired only briefly from graphics/model callbacks. It never acquires either.
+	std::mutex imageStateMutex;
+	std::mutex updateMutex;
+	gpu_image::ImagePipeline imagePipeline;
+	gpu_image::GpuInputPreprocessor imagePreprocessor;
+	gpu_image::GpuMaskProcessor imageMaskProcessor;
+	std::optional<gpu_image::FramePacket> legacyFrame;
+	std::optional<gpu_image::MaskPacket> legacyMask;
+	cv::Mat imageHistory, imageSimilarityHistory;
+	uint64_t historyGeneration = 0, consumedFrame = 0, imageFrameId = 0, displayEpoch = 0;
+	uint32_t imageMaskCounter = 0;
+	bool imageTerminal = false, imageProcessingFailed = false;
+	bool refreshImageProperties = false;
+	ImageRenderSettings imageRenderSettings;
+	std::string imageEffectiveProvider = "pending", imageSettingsHash, imageSourceHash;
+	uint32_t imageFpsNum = 0, imageFpsDen = 0;
+	ImageTelemetry imageTelemetry;
+	uint64_t imageLoggedGeneration = 0;
+	gpu_image::ProcessingState imageLoggedState = gpu_image::ProcessingState::Unavailable;
+	inline static std::atomic<uint64_t> nextImageFilterId{0};
+	const uint64_t imageFilterId = ++nextImageFilterId;
+	// Graphics-owned independent copy; helper textures are borrowed until the next helper call.
+	gs_texture_t *imageDisplayTexture = nullptr;
+	uint64_t imageDisplayEpoch = 0, imageDisplayFrame = 0;
+#endif
 
 	~background_removal_filter() { obs_log(LOG_INFO, "Background removal filter destructor called"); }
 };
@@ -147,8 +245,10 @@ static bool enable_advanced_settings(obs_properties_t *ppts, obs_property_t *p, 
 }
 
 obs_properties_t *background_filter_properties(void *data)
-{
-	obs_properties_t *props = obs_properties_create();
+try {
+	std::unique_ptr<obs_properties_t, decltype(&obs_properties_destroy)> propsOwner(obs_properties_create(),
+											&obs_properties_destroy);
+	obs_properties_t *props = propsOwner.get();
 
 	obs_property_t *advanced = obs_properties_add_bool(props, "advanced", obs_module_text("Advanced"));
 
@@ -198,6 +298,20 @@ obs_properties_t *background_filter_properties(void *data)
 		statusKey = windows_ml::session_status_text_key((*ptr)->sessionDiagnostics);
 	}
 	obs_properties_add_text(props, "inference_status", obs_module_text(statusKey.data()), OBS_TEXT_INFO);
+	auto *processing =
+		obs_properties_add_bool(props, "gpu_image_processing", obs_module_text("GPUImageProcessing"));
+	obs_property_set_long_description(processing, obs_module_text("GPUImageProcessingDescription"));
+	gpu_image::ProcessingSnapshot processingSnapshot{};
+	if (ptr && *ptr) {
+		std::lock_guard lock((*ptr)->imageStateMutex);
+		processingSnapshot = (*ptr)->imagePipeline.processing_snapshot();
+	}
+	obs_properties_add_text(props, "gpu_image_processing_status",
+				obs_module_text(gpu_image::processing_status_text_key(processingSnapshot).data()),
+				OBS_TEXT_INFO);
+	if (processingSnapshot.similarity_full_readback)
+		obs_properties_add_text(props, "gpu_image_similarity_status",
+					obs_module_text("GPUImageProcessingSimilarity"), OBS_TEXT_INFO);
 #endif
 #ifdef HAVE_ONNXRUNTIME_CUDA_EP
 	obs_property_list_add_string(p_use_gpu, obs_module_text("GPUCUDA"), USEGPU_CUDA);
@@ -273,11 +387,19 @@ obs_properties_t *background_filter_properties(void *data)
 	AboutDialogIntegration::addButton(props);
 
 	UNUSED_PARAMETER(data);
-	return props;
+	return propsOwner.release();
+}
+
+catch (const std::exception &error) {
+	obs_log(LOG_ERROR, "Background filter properties: %s", error.what());
+	return nullptr;
 }
 
 void background_filter_defaults(obs_data_t *settings)
 {
+#ifdef _WIN32
+	obs_data_set_default_bool(settings, "gpu_image_processing", false);
+#endif
 	obs_data_set_default_bool(settings, "advanced", false);
 	obs_data_set_default_bool(settings, "stop_when_source_is_inactive", true);
 	obs_data_set_default_bool(settings, "enable_threshold", true);
@@ -305,7 +427,7 @@ void background_filter_defaults(obs_data_t *settings)
 }
 
 void background_filter_update(void *data, obs_data_t *settings)
-{
+try {
 	obs_log(LOG_INFO, "Background filter updated");
 
 	// Cast to shared_ptr pointer and create a local shared_ptr
@@ -319,31 +441,47 @@ void background_filter_update(void *data, obs_data_t *settings)
 		return;
 	}
 
+#ifdef _WIN32
+	std::lock_guard updateLock(tf->updateMutex);
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (tf->imageTerminal)
+			return;
+	}
+#endif
 	tf->isDisabled = true;
 
-	tf->stopWhenSourceIsInactive = obs_data_get_bool(settings, "stop_when_source_is_inactive");
-	tf->enableThreshold = (float)obs_data_get_bool(settings, "enable_threshold");
-	tf->threshold = (float)obs_data_get_double(settings, "threshold");
+#ifdef _WIN32
+	{
+		std::lock_guard settingsLock(tf->modelMutex);
+#endif
+		tf->stopWhenSourceIsInactive = obs_data_get_bool(settings, "stop_when_source_is_inactive");
+		tf->enableThreshold = (float)obs_data_get_bool(settings, "enable_threshold");
+		tf->threshold = (float)obs_data_get_double(settings, "threshold");
 
-	tf->contourFilter = (float)obs_data_get_double(settings, "contour_filter");
-	tf->smoothContour = (float)obs_data_get_double(settings, "smooth_contour");
-	tf->maskExpansion = (int)obs_data_get_double(settings, "mask_expansion");
-	tf->feather = (float)obs_data_get_double(settings, "feather");
-	tf->maskEveryXFrames = (int)obs_data_get_int(settings, "mask_every_x_frames");
-	tf->maskEveryXFramesCount = (int)(0);
-	tf->blurBackground = obs_data_get_int(settings, "blur_background");
-	tf->enableFocalBlur = (float)obs_data_get_bool(settings, "enable_focal_blur");
-	tf->blurFocusPoint = (float)obs_data_get_double(settings, "blur_focus_point");
-	tf->blurFocusDepth = (float)obs_data_get_double(settings, "blur_focus_depth");
-	tf->temporalSmoothFactor = (float)obs_data_get_double(settings, "temporal_smooth_factor");
-	tf->imageSimilarityThreshold = (float)obs_data_get_double(settings, "image_similarity_threshold");
-	tf->enableImageSimilarity = (float)obs_data_get_bool(settings, "enable_image_similarity");
+		tf->contourFilter = (float)obs_data_get_double(settings, "contour_filter");
+		tf->smoothContour = (float)obs_data_get_double(settings, "smooth_contour");
+		tf->maskExpansion = (int)obs_data_get_double(settings, "mask_expansion");
+		tf->feather = (float)obs_data_get_double(settings, "feather");
+		tf->maskEveryXFrames = (int)obs_data_get_int(settings, "mask_every_x_frames");
+		tf->maskEveryXFramesCount = (int)(0);
+		tf->blurBackground = obs_data_get_int(settings, "blur_background");
+		tf->enableFocalBlur = (float)obs_data_get_bool(settings, "enable_focal_blur");
+		tf->blurFocusPoint = (float)obs_data_get_double(settings, "blur_focus_point");
+		tf->blurFocusDepth = (float)obs_data_get_double(settings, "blur_focus_depth");
+		tf->temporalSmoothFactor = (float)obs_data_get_double(settings, "temporal_smooth_factor");
+		tf->imageSimilarityThreshold = (float)obs_data_get_double(settings, "image_similarity_threshold");
+		tf->enableImageSimilarity = (float)obs_data_get_bool(settings, "enable_image_similarity");
 
+#ifdef _WIN32
+	}
+#endif
 	const std::string newUseGpu = obs_data_get_string(settings, "useGPU");
 	const std::string newModel = obs_data_get_string(settings, "model_select");
 	const uint32_t newNumThreads = (uint32_t)obs_data_get_int(settings, "numThreads");
 #ifdef _WIN32
 	bool sessionChanged = false;
+	const auto settingsHash = image_settings_fingerprint(settings);
 #endif
 
 	{
@@ -351,6 +489,22 @@ void background_filter_update(void *data, obs_data_t *settings)
 		std::unique_lock<std::mutex> lock(tf->modelMutex);
 		if (!tf->session || tf->modelSelection.empty() || tf->modelSelection != newModel ||
 		    tf->useGPU != newUseGpu || tf->numThreads != newNumThreads) {
+#ifdef _WIN32
+			{
+				std::lock_guard stateLock(tf->imageStateMutex);
+				auto initializing = tf->imagePipeline.snapshot();
+				initializing.requested = obs_data_get_bool(settings, "gpu_image_processing");
+				initializing.session_ready = false;
+				initializing.effective_directml = false;
+				tf->imagePipeline.configure(initializing);
+				tf->imageEffectiveProvider = "pending";
+				++tf->displayEpoch;
+				tf->legacyFrame.reset();
+				tf->legacyMask.reset();
+				tf->refreshImageProperties = true;
+				tf->imageTelemetry = {};
+			}
+#endif
 
 			// Re-initialize model if it's not already the selected one or switching inference device
 			tf->modelSelection = newModel;
@@ -390,6 +544,19 @@ void background_filter_update(void *data, obs_data_t *settings)
 				tf->isDisabled = true;
 				resetOrtSessionData(*tf);
 				tf->model.reset();
+#ifdef _WIN32
+				{
+					std::lock_guard stateLock(tf->imageStateMutex);
+					auto config = tf->imagePipeline.snapshot();
+					config.requested = obs_data_get_bool(settings, "gpu_image_processing");
+					config.session_ready = false;
+					config.effective_directml = false;
+					tf->imagePipeline.configure(config);
+					++tf->displayEpoch;
+					tf->legacyFrame.reset();
+					tf->legacyMask.reset();
+				}
+#endif
 				lock.unlock();
 #ifdef _WIN32
 				obs_source_update_properties(tf->source);
@@ -397,6 +564,56 @@ void background_filter_update(void *data, obs_data_t *settings)
 				return;
 			}
 		}
+
+#ifdef _WIN32
+		{
+			std::lock_guard stateLock(tf->imageStateMutex);
+			auto config = tf->imagePipeline.snapshot();
+			config.requested = obs_data_get_bool(settings, "gpu_image_processing");
+			config.windows = true;
+			config.mediapipe = tf->modelSelection == MODEL_MEDIAPIPE;
+			config.session_ready = tf->session && tf->model &&
+					       tf->sessionDiagnostics.outcome == windows_ml::SessionOutcome::Ready;
+			config.effective_directml = config.session_ready &&
+						    tf->sessionDiagnostics.effective_provider == "DmlExecutionProvider";
+			if (config.mediapipe && !tf->inputDims.empty() && tf->inputDims[0].size() == 4)
+				config.input = {static_cast<uint32_t>(tf->inputDims[0][2]),
+						static_cast<uint32_t>(tf->inputDims[0][1])};
+			else
+				config.input = {};
+			config.image_similarity = tf->enableImageSimilarity;
+			config.similarity_threshold = tf->imageSimilarityThreshold;
+			config.mask_every_x_frames = static_cast<uint32_t>(std::max(1, tf->maskEveryXFrames));
+			config.mask = {tf->enableThreshold, tf->threshold, tf->temporalSmoothFactor, tf->contourFilter,
+				       tf->smoothContour,   tf->feather,   tf->maskExpansion};
+			tf->imageRenderSettings = {tf->blurBackground, tf->enableFocalBlur, tf->blurFocusPoint,
+						   tf->blurFocusDepth};
+			tf->imageEffectiveProvider = tf->sessionDiagnostics.effective_provider;
+			const bool comparisonSettingsChanged = tf->imageSettingsHash != settingsHash;
+			tf->imageSettingsHash = settingsHash;
+			if (sessionChanged)
+				tf->imageProcessingFailed = false;
+			if (sessionChanged || comparisonSettingsChanged) {
+				// Comparison settings and explicit initialization invalidate work even when tensor metadata is unchanged.
+				auto pending = config;
+				pending.session_ready = false;
+				tf->imagePipeline.configure(pending);
+			}
+			const auto oldGeneration = tf->imagePipeline.snapshot().generation;
+			const auto generation = tf->imagePipeline.configure(config);
+			if (sessionChanged || generation != oldGeneration) {
+				++tf->displayEpoch;
+				tf->imageTelemetry = {};
+				tf->legacyFrame.reset();
+				tf->legacyMask.reset();
+				tf->refreshImageProperties = true;
+			}
+			if (tf->imageProcessingFailed && gpu_image::evaluate_processing_request(config).eligible)
+				tf->imagePipeline.set_processing_state(
+					generation, gpu_image::ProcessingState::CpuProcessingFallback,
+					"processing-failure-explicit-reinitialization-required");
+		}
+#endif
 	}
 #ifdef _WIN32
 	if (sessionChanged) {
@@ -405,6 +622,17 @@ void background_filter_update(void *data, obs_data_t *settings)
 #endif
 
 	obs_enter_graphics();
+#ifdef _WIN32
+	bool terminal;
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		terminal = tf->imageTerminal;
+	}
+	if (terminal) {
+		obs_leave_graphics();
+		return;
+	}
+#endif
 
 	char *effect_path = obs_module_file(EFFECT_PATH);
 	gs_effect_destroy(tf->effect);
@@ -448,8 +676,20 @@ void background_filter_update(void *data, obs_data_t *settings)
 	// Enable only a completely initialized session.
 	{
 		std::unique_lock<std::mutex> lock(tf->modelMutex);
+#ifdef _WIN32
+		std::lock_guard stateLock(tf->imageStateMutex);
+		tf->isDisabled = tf->imageTerminal || !tf->session || !tf->model;
+#else
 		tf->isDisabled = !tf->session || !tf->model;
+#endif
 	}
+}
+
+catch (const std::exception &error) {
+	auto *ptr = static_cast<std::shared_ptr<background_removal_filter> *>(data);
+	if (ptr && *ptr)
+		(*ptr)->isDisabled = true;
+	obs_log(LOG_ERROR, "Background filter update: %s", error.what());
 }
 
 void background_filter_activate(void *data)
@@ -463,7 +703,12 @@ void background_filter_activate(void *data)
 	if (tf && tf->stopWhenSourceIsInactive) {
 		std::unique_lock<std::mutex> lock(tf->modelMutex);
 		obs_log(LOG_INFO, "Background filter activated");
+#ifdef _WIN32
+		std::lock_guard stateLock(tf->imageStateMutex);
+		tf->isDisabled = tf->imageTerminal || !tf->session || !tf->model;
+#else
 		tf->isDisabled = !tf->session || !tf->model;
+#endif
 	}
 }
 
@@ -521,9 +766,25 @@ void background_filter_destroy(void *data)
 		if (*ptr) {
 			// Mark as disabled to prevent further processing
 			(*ptr)->isDisabled = true;
+#ifdef _WIN32
+			{
+				std::lock_guard stateLock((*ptr)->imageStateMutex);
+				(*ptr)->imageTerminal = true;
+				(*ptr)->imagePipeline.invalidate();
+				(*ptr)->legacyFrame.reset();
+				(*ptr)->legacyMask.reset();
+				++(*ptr)->displayEpoch;
+			}
+#endif
 
 			// Perform cleanup
 			obs_enter_graphics();
+#ifdef _WIN32
+			(*ptr)->imagePreprocessor.release();
+			(*ptr)->imageMaskProcessor.release();
+			gs_texture_destroy((*ptr)->imageDisplayTexture);
+			(*ptr)->imageDisplayTexture = nullptr;
+#endif
 			gs_texrender_destroy((*ptr)->texrender);
 			if ((*ptr)->stagesurface) {
 				gs_stagesurface_destroy((*ptr)->stagesurface);
@@ -538,6 +799,7 @@ void background_filter_destroy(void *data)
 	}
 }
 
+#ifndef _WIN32
 static void processImageForBackground(struct background_removal_filter *tf, const cv::Mat &imageBGRA,
 				      cv::Mat &backgroundMask)
 {
@@ -557,6 +819,477 @@ static void processImageForBackground(struct background_removal_filter *tf, cons
 	}
 }
 
+#endif
+
+#ifdef _WIN32
+// Caller holds imageStateMutex; every read/modify/configure is one transaction.
+static bool image_current(background_removal_filter &tf, const gpu_image::FrameStamp &stamp)
+{
+	const auto config = tf.imagePipeline.snapshot();
+	return !tf.imageTerminal && !tf.isDisabled && stamp.generation == config.generation &&
+	       stamp.source == config.source && stamp.input == config.input;
+}
+static void image_fail(background_removal_filter &tf, uint64_t generation, const char *reason)
+{
+	std::lock_guard lock(tf.imageStateMutex);
+	if (tf.imageTerminal || tf.isDisabled || tf.imagePipeline.snapshot().generation != generation)
+		return;
+	if (tf.imagePipeline.set_processing_state(generation, gpu_image::ProcessingState::CpuProcessingFallback,
+						  reason)) {
+		tf.imageProcessingFailed = true;
+		tf.imageTelemetry = {};
+		tf.legacyFrame.reset();
+		tf.legacyMask.reset();
+		tf.refreshImageProperties = true;
+		// Deliberately preserve only the independently owned, already accepted same-source display.
+	}
+}
+static void image_log(background_removal_filter &tf, bool stats, const obs_video_info &video, bool counters)
+{
+	// Called from tick outside graphics/model. State is only held while copying a record/resetting counters.
+	gpu_image::ProcessingSnapshot snapshot;
+	gpu_image::PipelineConfig config;
+	ImageTelemetry telemetry;
+	std::string provider, fingerprint, sourceHash;
+	ImageRenderSettings render;
+	uint64_t frameId;
+	{
+		std::lock_guard lock(tf.imageStateMutex);
+		if (tf.imageTerminal)
+			return;
+		snapshot = tf.imagePipeline.processing_snapshot();
+		if (!stats && tf.imageLoggedGeneration == snapshot.generation && tf.imageLoggedState == snapshot.state)
+			return;
+		if (stats && ProcessingClock::now() - tf.imageTelemetry.since < std::chrono::seconds(5))
+			return;
+		tf.imageLoggedGeneration = snapshot.generation;
+		tf.imageLoggedState = snapshot.state;
+		config = tf.imagePipeline.snapshot();
+		provider = tf.imageEffectiveProvider;
+		fingerprint = tf.imageSettingsHash;
+		sourceHash = tf.imageSourceHash;
+		render = tf.imageRenderSettings;
+		frameId = tf.imageFrameId;
+		telemetry = tf.imageTelemetry;
+		if (stats)
+			tf.imageTelemetry = {};
+	}
+	std::string reason = snapshot.reason;
+	for (auto &character : reason)
+		if (character == ' ' || character == '\t' || character == '\n' || character == '\r')
+			character = '-';
+	fingerprint = image_hash_text(
+		image_hash(sourceHash + ":" + std::to_string(video.fps_num) + ":" + std::to_string(video.fps_den),
+			   image_hash(fingerprint)));
+	// Structured, versioned collector API. Identifiers/settings are fingerprints, never raw camera IDs/JSON.
+	obs_log(LOG_INFO,
+		"GPUImageProcessing %s processing_version=1 filter_id=%llu settings_fingerprint=%s source_fingerprint=%s generation=%llu frame_id=%llu requested=%d state=%s effective_inference=%s preprocess_active=%d mask_active=%d similarity_full_readback=%d source_width=%u source_height=%u input_width=%u input_height=%u reason=%s fps_num=%u fps_den=%u enable_threshold=%d threshold=%.9g temporal_smooth_factor=%.9g contour_filter=%.9g smooth_contour=%.9g feather=%.9g mask_expansion=%d image_similarity=%d similarity_threshold=%.9g mask_every_x_frames=%u blur_background=%lld focal_blur=%d focus_point=%.9g focus_depth=%.9g processed=%llu skipped=%llu stale=%llu captured=%llu input_readback_pixels=%llu similarity_readback_pixels=%llu capture_host_elapsed_ms=%.6f inference_host_elapsed_ms=%.6f mask_host_elapsed_ms=%.6f interval_host_elapsed_ms=%.6f obs_counters_available=%d obs_rendered_frames=%u obs_lagged_frames=%u obs_average_frame_host_ns=%llu",
+		stats ? "stats" : "state", static_cast<unsigned long long>(tf.imageFilterId), fingerprint.c_str(),
+		sourceHash.c_str(), static_cast<unsigned long long>(snapshot.generation),
+		static_cast<unsigned long long>(frameId), snapshot.requested, image_state_name(snapshot.state),
+		provider.empty() ? "pending" : provider.c_str(), snapshot.preprocess_active, snapshot.mask_active,
+		snapshot.similarity_full_readback, snapshot.source.width, snapshot.source.height, snapshot.input.width,
+		snapshot.input.height, reason.empty() ? "none" : reason.c_str(), video.fps_num, video.fps_den,
+		config.mask.enable_threshold, config.mask.threshold, config.mask.temporal_smooth_factor,
+		config.mask.contour_filter, config.mask.smooth_contour, config.mask.feather, config.mask.mask_expansion,
+		config.image_similarity, config.similarity_threshold, config.mask_every_x_frames,
+		static_cast<long long>(render.blur), render.focal, render.focus_point, render.focus_depth,
+		static_cast<unsigned long long>(telemetry.processed),
+		static_cast<unsigned long long>(telemetry.skipped), static_cast<unsigned long long>(telemetry.stale),
+		static_cast<unsigned long long>(telemetry.frames),
+		static_cast<unsigned long long>(telemetry.input_pixels),
+		static_cast<unsigned long long>(telemetry.similarity_pixels), telemetry.capture_ms,
+		telemetry.inference_ms, telemetry.mask_ms, image_elapsed_ms(telemetry.since), counters,
+		counters ? obs_get_total_frames() : 0, counters ? obs_get_lagged_frames() : 0,
+		static_cast<unsigned long long>(counters ? obs_get_average_frame_time_ns() : 0));
+}
+static void image_tick(const std::shared_ptr<background_removal_filter> &tf)
+{
+	std::unique_ptr<obs_source_t, decltype(&obs_source_release)> sourceOwner(nullptr, &obs_source_release);
+	bool refresh;
+	{
+		std::lock_guard lock(tf->imageStateMutex);
+		if (tf->imageTerminal)
+			return;
+		sourceOwner.reset(obs_source_get_ref(tf->source));
+		refresh = std::exchange(tf->refreshImageProperties, false);
+	}
+	if (!sourceOwner)
+		return;
+	// OBS invokes video_tick outside its graphics context. No model/state locks are held here.
+	if (refresh)
+		obs_source_update_properties(tf->source);
+	obs_video_info video{};
+	const bool counters = obs_get_video_info(&video);
+	image_log(*tf, false, video, counters);
+	image_log(*tf, true, video, counters);
+	if (tf->isDisabled || !obs_source_enabled(tf->source))
+		return;
+
+	std::unique_lock modelLock(tf->modelMutex);
+	if (tf->isDisabled || !tf->session || !tf->model)
+		return;
+	gpu_image::PipelineConfig config;
+	std::optional<gpu_image::FramePacket> frame;
+	cv::Mat history, similarityHistory;
+	bool gpu;
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (tf->imageTerminal || tf->isDisabled)
+			return;
+		config = tf->imagePipeline.snapshot();
+		gpu = tf->imagePipeline.processing_snapshot().preprocess_active;
+		if (!gpu)
+			frame = tf->legacyFrame; // immutable owned storage, shallow lifetime snapshot
+	}
+	if (gpu)
+		frame = tf->imagePipeline.latest_frame(); // full compatibility clone outside state gate
+	if (!frame)
+		return;
+	const auto packet = *frame;
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (!image_current(*tf, packet.stamp) || packet.stamp.generation != config.generation ||
+		    packet.stamp.frame_id <= tf->consumedFrame)
+			return;
+		tf->consumedFrame = packet.stamp.frame_id;
+		if (tf->historyGeneration != config.generation) {
+			tf->imageHistory.release();
+			tf->imageSimilarityHistory.release();
+			tf->imageMaskCounter = 0;
+			tf->historyGeneration = config.generation;
+		}
+		history = tf->imageHistory;
+		similarityHistory = tf->imageSimilarityHistory;
+	}
+	const cv::Mat &similarity = gpu ? packet.similarity_bgra : packet.input_bgra;
+	const bool similaritySkip = config.image_similarity && !similarityHistory.empty() &&
+				    similarityHistory.size() == similarity.size() &&
+				    cv::PSNR(similarityHistory, similarity) > config.similarity_threshold;
+	cv::Mat nextSimilarity;
+	if (config.image_similarity && !similaritySkip)
+		nextSimilarity = similarity.clone();
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (!image_current(*tf, packet.stamp)) {
+			++tf->imageTelemetry.stale;
+			return;
+		}
+		if (similaritySkip) {
+			++tf->imageTelemetry.skipped;
+			return;
+		}
+		if (config.image_similarity)
+			tf->imageSimilarityHistory = std::move(nextSimilarity);
+		tf->imageMaskCounter = (tf->imageMaskCounter + 1) % config.mask_every_x_frames;
+		if (tf->imageMaskCounter != 0) {
+			++tf->imageTelemetry.skipped;
+			return;
+		}
+	}
+	const auto inferenceStart = ProcessingClock::now();
+	cv::Mat bytes;
+	if (!runFilterModelInference(tf.get(), packet.input_bgra, bytes) || bytes.empty())
+		return;
+	const double inferenceMs = image_elapsed_ms(inferenceStart);
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (!image_current(*tf, packet.stamp)) {
+			++tf->imageTelemetry.stale;
+			return;
+		}
+	}
+	const auto maskStart = ProcessingClock::now();
+	gpu_image::SmallMaskPreparation prepared;
+	try {
+		prepared = gpu_image::prepare_small_mask(bytes, history, config.mask);
+	} catch (const std::exception &) {
+		if (gpu)
+			image_fail(*tf, config.generation, "small-mask-preparation-failed");
+		throw;
+	}
+	gpu_image::MaskPacket mask{
+		packet.stamp,
+		gpu ? prepared.mask : gpu_image::finish_mask_cpu(prepared.mask, config.source, config.mask), gpu};
+	const bool published = !gpu || tf->imagePipeline.publish_mask(mask);
+	std::lock_guard stateLock(tf->imageStateMutex);
+	if (!image_current(*tf, packet.stamp) || !published) {
+		++tf->imageTelemetry.stale;
+		return;
+	}
+	if (!gpu) {
+		tf->legacyMask = mask;
+		// Retained legacy output remains available to existing filter observers.
+		std::lock_guard outputLock(tf->outputLock);
+		tf->backgroundMask = mask.mask;
+	}
+	// Commit uncontoured history only after publication has been accepted for this generation.
+	tf->imageHistory = std::move(prepared.temporal_history);
+	++tf->imageTelemetry.processed;
+	tf->imageTelemetry.inference_ms += inferenceMs;
+	tf->imageTelemetry.mask_ms += image_elapsed_ms(maskStart);
+}
+// Render full source without forcing a CPU readback; eligible preprocessing samples this texture.
+static bool image_render_source(background_removal_filter &tf, uint32_t &width, uint32_t &height)
+{
+	auto *target = obs_filter_get_target(tf.source);
+	if (!target || !obs_source_enabled(tf.source))
+		return false;
+	width = obs_source_get_base_width(target);
+	height = obs_source_get_base_height(target);
+	if (!width || !height)
+		return false;
+	gs_texrender_reset(tf.texrender);
+	if (!gs_texrender_begin(tf.texrender, width, height))
+		return false;
+	vec4 clear;
+	vec4_zero(&clear);
+	gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+	gs_ortho(0.0f, static_cast<float>(width), 0.0f, static_cast<float>(height), -100.0f, 100.0f);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+	obs_source_video_render(target);
+	gs_blend_state_pop();
+	gs_texrender_end(tf.texrender);
+	return true;
+}
+static cv::Mat image_full_readback(background_removal_filter &tf, gpu_image::Dimensions source)
+{
+	if (tf.stagesurface && (gs_stagesurface_get_width(tf.stagesurface) != source.width ||
+				gs_stagesurface_get_height(tf.stagesurface) != source.height)) {
+		gs_stagesurface_destroy(tf.stagesurface);
+		tf.stagesurface = nullptr;
+	}
+	if (!tf.stagesurface)
+		tf.stagesurface = gs_stagesurface_create(source.width, source.height, GS_BGRA);
+	if (!tf.stagesurface)
+		return {};
+	gs_stage_texture(tf.stagesurface, gs_texrender_get_texture(tf.texrender));
+	uint8_t *data = nullptr;
+	uint32_t pitch = 0;
+	if (!gs_stagesurface_map(tf.stagesurface, &data, &pitch))
+		return {};
+	cv::Mat copy;
+	try {
+		if (data && uint64_t{pitch} >= uint64_t{source.width} * 4)
+			copy = cv::Mat(static_cast<int>(source.height), static_cast<int>(source.width), CV_8UC4, data,
+				       pitch)
+				       .clone();
+	} catch (...) {
+		gs_stagesurface_unmap(tf.stagesurface);
+		throw;
+	}
+	gs_stagesurface_unmap(tf.stagesurface);
+	return copy;
+}
+static bool image_capture(const std::shared_ptr<background_removal_filter> &tf, uint32_t &width, uint32_t &height,
+			  ImageRenderSettings &render)
+{
+	// Already in graphics. No model consultation, including when source dimensions change.
+	if (!image_render_source(*tf, width, height))
+		return false;
+	auto *target = obs_filter_get_target(tf->source);
+	obs_data_t *sourceSettings = obs_source_get_settings(target);
+	const auto sourceHash = image_hash_text(
+		image_hash(obs_data_get_json_with_defaults(sourceSettings), image_hash(obs_source_get_uuid(target))));
+	obs_data_release(sourceSettings);
+	obs_video_info video{};
+	obs_get_video_info(&video);
+	gpu_image::PipelineConfig config;
+	gpu_image::FrameStamp stamp;
+	bool gpu;
+	uint64_t epoch;
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (tf->imageTerminal || tf->isDisabled)
+			return false;
+		config = tf->imagePipeline.snapshot();
+		const auto oldGeneration = config.generation;
+		config.source = {width, height};
+		// Source/FPS changes are authoritative even if the source size is unchanged.
+		if ((!tf->imageSourceHash.empty() && tf->imageSourceHash != sourceHash) ||
+		    (tf->imageFpsNum && (tf->imageFpsNum != video.fps_num || tf->imageFpsDen != video.fps_den))) {
+			auto pending = config;
+			pending.session_ready = false;
+			tf->imagePipeline.configure(pending);
+		}
+		tf->imagePipeline.configure(config);
+		config = tf->imagePipeline.snapshot();
+		if (oldGeneration != config.generation) {
+			++tf->displayEpoch;
+			tf->imageTelemetry = {};
+			tf->legacyFrame.reset();
+			tf->legacyMask.reset();
+			tf->refreshImageProperties = true;
+		}
+		tf->imageSourceHash = sourceHash;
+		tf->imageFpsNum = video.fps_num;
+		tf->imageFpsDen = video.fps_den;
+		if (tf->imageProcessingFailed && gpu_image::evaluate_processing_request(config).eligible &&
+		    tf->imagePipeline.processing_snapshot().state !=
+			    gpu_image::ProcessingState::CpuProcessingFallback) {
+			tf->imagePipeline.set_processing_state(config.generation,
+							       gpu_image::ProcessingState::CpuProcessingFallback,
+							       "processing-failure-explicit-reinitialization-required");
+			config = tf->imagePipeline.snapshot();
+		}
+		gpu = gpu_image::evaluate_processing_request(config).eligible && !tf->imageProcessingFailed;
+		stamp = {config.generation, ++tf->imageFrameId, config.source, config.input};
+		render = tf->imageRenderSettings;
+		epoch = tf->displayEpoch;
+	}
+	if (tf->imageDisplayEpoch != epoch) {
+		gs_texture_destroy(tf->imageDisplayTexture);
+		tf->imageDisplayTexture = nullptr;
+		tf->imageDisplayFrame = 0;
+		tf->imageDisplayEpoch = epoch;
+	}
+	const auto start = ProcessingClock::now();
+	if (gpu) {
+		char *inputPath = obs_module_file("effects/input_downscale.effect");
+		const bool ready = tf->imagePreprocessor.prepare(config, inputPath);
+		bfree(inputPath);
+		if (!ready) {
+			image_fail(*tf, config.generation, "input-preparation-failed");
+			return true;
+		}
+		auto frame = tf->imagePreprocessor.capture(gs_texrender_get_texture(tf->texrender), stamp,
+							   config.image_similarity);
+		if (!frame) {
+			image_fail(*tf, config.generation, "input-readback-failed");
+			return true;
+		}
+		const bool published = tf->imagePipeline.publish_frame(*frame);
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (!image_current(*tf, stamp) || !published) {
+			++tf->imageTelemetry.stale;
+			return true;
+		}
+		if (tf->imagePipeline.processing_snapshot().state == gpu_image::ProcessingState::Pending) {
+			tf->imagePipeline.set_processing_state(
+				config.generation, gpu_image::ProcessingState::PreprocessOnly, "mask-pending");
+			tf->refreshImageProperties = true;
+		}
+		tf->imageTelemetry.input_pixels += uint64_t{config.input.width} * config.input.height;
+		if (config.image_similarity)
+			tf->imageTelemetry.similarity_pixels += uint64_t{width} * height;
+		++tf->imageTelemetry.frames;
+		tf->imageTelemetry.capture_ms += image_elapsed_ms(start);
+	} else {
+		auto pixels = image_full_readback(*tf, config.source);
+		if (pixels.empty())
+			return false;
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (!image_current(*tf, stamp)) {
+			++tf->imageTelemetry.stale;
+			return true;
+		}
+		tf->legacyFrame = gpu_image::FramePacket{stamp, pixels, {}};
+		{
+			std::lock_guard inputLock(tf->inputBGRALock);
+			tf->inputBGRA = pixels;
+		}
+		tf->imageTelemetry.input_pixels += uint64_t{width} * height;
+		++tf->imageTelemetry.frames;
+		tf->imageTelemetry.capture_ms += image_elapsed_ms(start);
+	}
+	return true;
+}
+static gs_texture_t *image_cached_display(background_removal_filter &tf, uint64_t epoch)
+{
+	std::lock_guard stateLock(tf.imageStateMutex);
+	if (tf.imageTerminal || tf.isDisabled || tf.displayEpoch != epoch)
+		return nullptr;
+	return tf.imageDisplayTexture;
+}
+static gs_texture_t *image_display(const std::shared_ptr<background_removal_filter> &tf)
+{
+	gpu_image::PipelineConfig config;
+	std::optional<gpu_image::MaskPacket> mask;
+	uint64_t epoch;
+	bool gpu;
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (tf->imageTerminal || tf->isDisabled)
+			return nullptr;
+		config = tf->imagePipeline.snapshot();
+		epoch = tf->displayEpoch;
+		gpu = tf->imagePipeline.processing_snapshot().preprocess_active;
+		if (!gpu)
+			mask = tf->legacyMask;
+	}
+	if (gpu)
+		mask = tf->imagePipeline.latest_mask();
+	{
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (mask && (!image_current(*tf, mask->stamp) || mask->stamp.generation != config.generation))
+			mask.reset();
+	}
+	if (tf->imageDisplayEpoch != epoch) {
+		gs_texture_destroy(tf->imageDisplayTexture);
+		tf->imageDisplayTexture = nullptr;
+		tf->imageDisplayEpoch = epoch;
+		tf->imageDisplayFrame = 0;
+	}
+	if (mask && mask->stamp.frame_id > tf->imageDisplayFrame) {
+		gs_texture_t *texture = nullptr;
+		const auto start = ProcessingClock::now();
+		if (mask->gpu_postprocess) {
+			char *path = obs_module_file("effects/gpu_mask_processing.effect");
+			const bool ready = tf->imageMaskProcessor.prepare(config.input, config.source, path);
+			bfree(path);
+			if (ready)
+				texture = tf->imageMaskProcessor.process(*mask, config.mask);
+			if (!texture) {
+				image_fail(*tf, config.generation, "mask-processing-failed");
+				return image_cached_display(*tf, epoch);
+			}
+		} else {
+			const auto *pixels = mask->mask.data;
+			texture = gs_texture_create(static_cast<uint32_t>(mask->mask.cols),
+						    static_cast<uint32_t>(mask->mask.rows), GS_R8, 1, &pixels, 0);
+		}
+		if (!texture)
+			return image_cached_display(*tf, epoch);
+		gs_texture_t *owned = gs_texture_create(gs_texture_get_width(texture), gs_texture_get_height(texture),
+							gs_texture_get_color_format(texture), 1, nullptr, 0);
+		if (owned)
+			gs_copy_texture(owned, texture);
+		else if (mask->gpu_postprocess)
+			image_fail(*tf, config.generation, "display-copy-allocation-failed");
+		if (!mask->gpu_postprocess)
+			gs_texture_destroy(texture);
+		{
+			std::lock_guard stateLock(tf->imageStateMutex);
+			if (owned && image_current(*tf, mask->stamp) && epoch == tf->displayEpoch) {
+				gs_texture_destroy(tf->imageDisplayTexture);
+				tf->imageDisplayTexture = owned;
+				tf->imageDisplayEpoch = epoch;
+				tf->imageDisplayFrame = mask->stamp.frame_id;
+				if (mask->gpu_postprocess &&
+				    tf->imagePipeline.set_processing_state(config.generation,
+									   gpu_image::ProcessingState::Active, "none"))
+					tf->refreshImageProperties = true;
+				tf->imageTelemetry.mask_ms += image_elapsed_ms(start);
+			} else {
+				gs_texture_destroy(owned);
+				++tf->imageTelemetry.stale;
+			}
+		}
+	}
+	// A texture is always initialized. No old-source mask is stretched onto a resized source.
+	if (!tf->imageDisplayTexture) {
+		cv::Mat clear(static_cast<int>(config.source.height), static_cast<int>(config.source.width), CV_8UC1,
+			      cv::Scalar(255));
+		const auto *pixels = clear.data;
+		tf->imageDisplayTexture =
+			gs_texture_create(config.source.width, config.source.height, GS_R8, 1, &pixels, 0);
+		tf->imageDisplayEpoch = epoch;
+	}
+	return image_cached_display(*tf, epoch);
+}
+#endif
+
 void background_filter_video_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
@@ -572,6 +1305,16 @@ void background_filter_video_tick(void *data, float seconds)
 	// even if filter_destroy is called on the main thread
 	std::shared_ptr<background_removal_filter> tf = *ptr;
 
+#ifdef _WIN32
+	if (tf) {
+		try {
+			image_tick(tf);
+		} catch (const std::exception &error) {
+			obs_log(LOG_ERROR, "GPU image tick: %s", error.what());
+		}
+	}
+	return;
+#else
 	if (!tf || tf->isDisabled) {
 		return;
 	}
@@ -722,15 +1465,36 @@ void background_filter_video_tick(void *data, float seconds)
 	} catch (const std::exception &e) {
 		obs_log(LOG_ERROR, "%s", e.what());
 	}
+#endif
 }
 
 static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> tf, uint32_t width, uint32_t height,
-				     gs_texture_t *alphaTexture)
+				     gs_texture_t *alphaTexture
+#ifdef _WIN32
+				     ,
+				     const ImageRenderSettings &render
+#endif
+)
 {
-	if (tf->blurBackground == 0 || !tf->kawaseBlurEffect) {
+#ifdef _WIN32
+	const auto blur = render.blur;
+	const auto focal = render.focal;
+	const auto point = render.focus_point;
+	const auto depth = render.focus_depth;
+#else
+	const auto blur = tf->blurBackground;
+	const auto focal = tf->enableFocalBlur;
+	const auto point = tf->blurFocusPoint;
+	const auto depth = tf->blurFocusDepth;
+#endif
+	if (blur == 0 || !tf->kawaseBlurEffect) {
 		return nullptr;
 	}
 	gs_texture_t *blurredTexture = gs_texture_create(width, height, GS_BGRA, 1, nullptr, 0);
+#ifdef _WIN32
+	if (!blurredTexture)
+		return nullptr;
+#endif
 	gs_copy_texture(blurredTexture, gs_texrender_get_texture(tf->texrender));
 	gs_eparam_t *image = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "image");
 	gs_eparam_t *focalmask = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "focalmask");
@@ -741,7 +1505,7 @@ static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> 
 	gs_eparam_t *blurFocusPointParam = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "blurFocusPoint");
 	gs_eparam_t *blurFocusDepthParam = gs_effect_get_param_by_name(tf->kawaseBlurEffect, "blurFocusDepth");
 
-	for (int i = 0; i < (int)tf->blurBackground; i++) {
+	for (int i = 0; i < (int)blur; i++) {
 		gs_texrender_reset(tf->texrender);
 		if (!gs_texrender_begin(tf->texrender, width, height)) {
 			obs_log(LOG_INFO, "Could not open background blur texrender!");
@@ -753,9 +1517,9 @@ static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> 
 		gs_effect_set_float(xOffset, ((float)i + 0.5f) / (float)width);
 		gs_effect_set_float(yOffset, ((float)i + 0.5f) / (float)height);
 		gs_effect_set_int(blurIter, i);
-		gs_effect_set_int(blurTotal, (int)tf->blurBackground);
-		gs_effect_set_float(blurFocusPointParam, tf->blurFocusPoint);
-		gs_effect_set_float(blurFocusDepthParam, tf->blurFocusDepth);
+		gs_effect_set_int(blurTotal, (int)blur);
+		gs_effect_set_float(blurFocusPointParam, point);
+		gs_effect_set_float(blurFocusDepthParam, depth);
 
 		struct vec4 background;
 		vec4_zero(&background);
@@ -764,7 +1528,7 @@ static gs_texture_t *blur_background(std::shared_ptr<background_removal_filter> 
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 
-		const char *blur_type = (tf->enableFocalBlur) ? "DrawFocalBlur" : "Draw";
+		const char *blur_type = (focal) ? "DrawFocalBlur" : "Draw";
 
 		while (gs_effect_loop(tf->kawaseBlurEffect, blur_type)) {
 			gs_draw_sprite(blurredTexture, 0, width, height);
@@ -789,14 +1553,45 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 	// Create a local shared_ptr
 	std::shared_ptr<background_removal_filter> tf = *ptr;
 
+#ifdef _WIN32
+	std::unique_ptr<obs_source_t, decltype(&obs_source_release)> sourceOwner(nullptr, &obs_source_release);
+	if (tf) {
+		std::lock_guard stateLock(tf->imageStateMutex);
+		if (tf->imageTerminal)
+			return;
+		sourceOwner.reset(obs_source_get_ref(tf->source));
+	}
+	if (!sourceOwner)
+		return;
+#endif
+
 	if (!tf || tf->isDisabled) {
-		if (tf && tf->source) {
-			obs_source_skip_video_filter(tf->source);
+#ifdef _WIN32
+		if (tf) {
+			std::lock_guard stateLock(tf->imageStateMutex);
+			if (tf->imageTerminal)
+				return;
 		}
+#endif
+		if (tf && tf->source)
+			obs_source_skip_video_filter(tf->source);
 		return;
 	}
 
 	uint32_t width, height;
+#ifdef _WIN32
+	ImageRenderSettings render;
+	try {
+		if (!image_capture(tf, width, height, render)) {
+			obs_source_skip_video_filter(tf->source);
+			return;
+		}
+	} catch (const std::exception &error) {
+		obs_log(LOG_ERROR, "GPU image capture: %s", error.what());
+		obs_source_skip_video_filter(tf->source);
+		return;
+	}
+#else
 	if (!getRGBAFromStageSurface(tf.get(), width, height)) {
 		if (tf->source) {
 			obs_source_skip_video_filter(tf->source);
@@ -804,6 +1599,7 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 		return;
 	}
 
+#endif
 	if (!tf->effect) {
 		// Effect failed to load, skip rendering
 		if (tf->source) {
@@ -813,6 +1609,17 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 	}
 
 	gs_texture_t *alphaTexture = nullptr;
+#ifdef _WIN32
+	try {
+		alphaTexture = image_display(tf);
+	} catch (const std::exception &error) {
+		obs_log(LOG_ERROR, "GPU image mask: %s", error.what());
+	}
+	if (!alphaTexture) {
+		obs_source_skip_video_filter(tf->source);
+		return;
+	}
+#else
 	{
 		std::lock_guard<std::mutex> lock(tf->outputLock);
 
@@ -836,14 +1643,22 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 		}
 	}
 
+#endif
 	// Output the masked image
-	gs_texture_t *blurredTexture = blur_background(tf, width, height, alphaTexture);
+	gs_texture_t *blurredTexture = blur_background(tf, width, height, alphaTexture
+#ifdef _WIN32
+						       ,
+						       render
+#endif
+	);
 
 	if (!obs_source_process_filter_begin(tf->source, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING)) {
 		if (tf->source) {
 			obs_source_skip_video_filter(tf->source);
 		}
+#ifndef _WIN32
 		gs_texture_destroy(alphaTexture);
+#endif
 		gs_texture_destroy(blurredTexture);
 		return;
 	}
@@ -853,7 +1668,13 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 
 	gs_effect_set_texture(alphamask, alphaTexture);
 
-	if (tf->blurBackground > 0) {
+	if (
+#ifdef _WIN32
+		render.blur > 0
+#else
+		tf->blurBackground > 0
+#endif
+	) {
 		gs_effect_set_texture(blurredBackground, blurredTexture);
 	}
 
@@ -861,8 +1682,20 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 	gs_reset_blend_state();
 
 	const char *techName;
-	if (tf->blurBackground > 0) {
-		if (tf->enableFocalBlur)
+	if (
+#ifdef _WIN32
+		render.blur > 0
+#else
+		tf->blurBackground > 0
+#endif
+	) {
+		if (
+#ifdef _WIN32
+			render.focal
+#else
+			tf->enableFocalBlur
+#endif
+		)
 			techName = "DrawWithFocalBlur";
 		else
 			techName = "DrawWithBlur";
@@ -874,6 +1707,8 @@ void background_filter_video_render(void *data, gs_effect_t *_effect)
 
 	gs_blend_state_pop();
 
+#ifndef _WIN32
 	gs_texture_destroy(alphaTexture);
+#endif
 	gs_texture_destroy(blurredTexture);
 }
