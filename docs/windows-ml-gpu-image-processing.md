@@ -3,56 +3,83 @@ SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalve
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# Processamento de imagem na GPU — comparação OBS
+# Windows DirectML and GPU image processing
 
-Estado: implementação/entrega e aceitação de hardware pendentes. Não existe ainda uma medição aceite de redução de CPU do OBS. O source/artifact final, reviews, Windows CI e hashes serão preenchidos apenas depois dos gates exatos.
+The Windows implementation is available in this fork's `main` after [PR #3](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/3) was merged on 2026-10-03. The downloadable [Windows x64 preview](https://github.com/goncalogoncalves02/obs-backgroundremoval/releases/tag/1.4.1-amd-directml-preview.1) contains the exact source build tested on the owner's Radeon RX 9070 XT. See the [hardware acceptance](windows-ml-gpu-image-processing-acceptance.md) and [publication record](windows-ml-amd-release.md) for evidence and limits.
 
-Esta comparação mantém MediaPipe e GPU - DirectML nos dois modos. A checkbox **Processamento de imagem na GPU** controla redução da imagem antes da leitura CPU e processamento espacial da máscara na GPU; a opção desligada mantém o processamento CPU anterior. O resultado mede CPU do processo OBS completo, incluindo o resto da cena.
+## Install the Windows preview
 
-## Uma transferência e dois comandos
+1. Download **obs-backgroundremoval_gpu-image-processing_x64.zip** from the release's Assets. This is the installation bundle, rather than GitHub's automatically generated source-code ZIP.
+2. Extract the three files into **Downloads\obs-br-gpu**. Keep the embedded **obs-backgroundremoval_1.4.1.dll.zip** intact.
+3. Close OBS. Open PowerShell as administrator and run:
 
-Descarrega o único ZIP de entrega indicado na confirmação final; extrai o conteúdo para uma pasta **obs-br-processamento-gpu** em Downloads. Fecha OBS. Abre PowerShell como administrador e executa:
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\obs-br-gpu\instalar-processamento-gpu.ps1"
+```
 
-~~~powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\obs-br-processamento-gpu\instalar-processamento-gpu.ps1"
-~~~
+The installer verifies the ZIP and each installed file, and preserves the previous plugin tree and receipt outside OBS plugin search paths. It does not acquire providers. The script names and action parameters remain Portuguese because they belong to the already verified package; keep them exactly as shown.
 
-Abre OBS normalmente com a mesma cena/câmera. No mesmo PowerShell:
+To restore the previous installation, close OBS and run:
 
-~~~powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\obs-br-processamento-gpu\testar-processamento-gpu.ps1"
-~~~
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\obs-br-gpu\instalar-processamento-gpu.ps1" -Acao Restaurar
+```
 
-O instalador verifica os bytes exatos do ZIP e todos os ficheiros instalados, preservando a build e o recibo anteriores fora das pastas de plugins. Não adquire providers. Para repor a instalação anterior, fecha OBS e executa o primeiro comando com **-Acao Restaurar**.
+## Enable the accepted configuration
 
-O script guia OFF → ON → ON → OFF. Cada bloco dura 20 segundos: cinco para estabilizar e quinze medidos. Depois desses vinte segundos, observa os logs durante até 6,2 segundos adicionais para confirmar telemetria que cubra o fim e recolher falhas tardias; esse tempo não entra na medição CPU. Os prompts pedem alterações manuais na checkbox; o script valida os estados efetivos nos logs. Mantém iluminação, movimento, resolução/FPS, definições da máscara e restante carga iguais.
+Open OBS and add **Background Removal** to the webcam source's filters. Open advanced settings to select **MediaPipe**. Set **Inference device** to **GPU - DirectML**, enable **GPU image processing**, and disable **Skip image based on similarity?** for the configuration measured below.
 
-A comparação padrão pede Similaridade de imagem desligada nos dois modos e recorda a opção anterior para a repores. Se usas normalmente similaridade, repete o segundo comando com **-ManterSimilaridade**; esse resultado é guardado e relatado separadamente.
+The inference status should show **Processor: GPU - DirectML**. GPU image processing has its own status: **GPU image processing: input and mask active** confirms both stages. CPU is the default inference choice, and the GPU image-processing checkbox defaults OFF. Choosing DirectML alone does not enable GPU image processing.
 
-## Como ler o resultado
+The checkbox moves source-image downscaling and mask resizing/smoothing/expansion/feather to GPU processing. Initial contour filtering remains on the small CPU mask. Both checkbox OFF and ON can use DirectML inference; OFF retains the earlier CPU image-processing path.
 
-CPU normalizada = 100 × delta de segundos CPU / (segundos monotónicos decorridos × processadores lógicos). Por exemplo, um segundo de CPU em dez segundos com dezasseis processadores lógicos corresponde a 0,625%.
+GPU image processing requires Windows, MediaPipe and a completed effective DirectML session. Another model or unavailable inference provider can produce an explicitly displayed CPU inference fallback. A GPU **image-processing** failure can keep DirectML inference while using CPU image processing until reinitialization. Read both status messages rather than assuming the requested device is active. See [DirectML session selection](windows-ml-directml-ui.md).
 
-Cada amostra CPU regista o início/fim e a duração da leitura real do sistema. Uma aquisição acima de 50 ms ou um desvio acima de 50 ms da janela programada invalida o bloco; os limites CPU, de fecho de telemetria e de observação são apresentados separadamente.
+## Why leave image similarity OFF?
 
-O resumo apresenta médias e intervalos dos blocos OFF/ON, diferença em pontos percentuais e alteração relativa em percentagem. Separação dos intervalos é uma melhoria observada nesta comparação sequencial, sem alegação de confiança estatística. Intervalos sobrepostos, restart, mudança de filtro/fonte/definições, logs incompletos/tardios ou fallback tornam o resultado inconclusivo.
+**Skip image based on similarity?** still reads the complete source image back to the CPU and compares it with image history. With movement, that work can cost more than the inference it avoids. The owner separately observed CPU usage rise after re-enabling it, but supplied no controlled numeric result for that combination.
 
-Os tempos de componentes incluem espera no host; não são tempo de execução GPU. Rendering lag usa os contadores OBS em limites de telemetria registados separadamente da janela CPU. Dropped/network frames são evidência incompleta quando não existem estatísticas OBS frescas; não são estimados pelo tempo de inferência.
+For the accepted result, similarity was OFF in both modes. Moving similarity comparison to the GPU and direct OBS–DirectML memory sharing are future changes, not features of this preview.
 
-O script também pede confirmação de qualidade da máscara/cabelo/bordos, resposta ao movimento, ON/OFF, CPU/DirectML, resize e remoção/recriação. Qualidade/funcionalidade e medição de CPU são resultados separados. Uma melhoria de CPU com pior máscara ou rendering não constitui aceitação de desempenho.
+## Optional CPU comparison
 
-Os logs, amostras e caminhos completos ficam locais. Envia apenas o **resumo.txt** impresso pelo script. Preserva backups, recibos e logs se aparecer um erro; o resumo identifica a build e os motivos sem expor dados da câmera ou caminhos pessoais.
+The feature is usable without running the comparison script. To measure your own scene, keep OBS open with MediaPipe + GPU - DirectML selected and run:
 
-## Registo pendente
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\obs-br-gpu\testar-processamento-gpu.ps1"
+```
 
-| Gate | Estado |
+The script prompts you to set the checkbox **OFF → ON → ON → OFF**. Change it manually, then press Enter in the terminal. Each block has five seconds settling followed by fifteen seconds CPU measurement. It observes logs for up to 6.2 additional seconds to cover the measurement end and catch late failures; that observation does not extend the CPU window. Keep the source, lighting, movement, resolution/FPS, mask settings and other workload comparable.
+
+The default comparison asks you to disable image similarity equally in both modes and reminds you to restore its previous setting. To test your usual similarity setting separately, add **-ManterSimilaridade**. Do not combine that result with the similarity-OFF comparison.
+
+Normalized CPU is `100 × CPU-seconds delta / (elapsed monotonic seconds × logical processors)`. The result measures the whole OBS process, including other sources and scene work. Actual OS reads are timestamped; acquisition longer than 50 ms or endpoint drift beyond 50 ms invalidates a block.
+
+The summary reports OFF/ON means, ranges, percentage-point difference and relative change. Separated block ranges indicate an observed improvement in this sequential comparison, without statistical confidence. Overlapping ranges, OBS restart, changed source/settings, missing or incomplete logs, or fallback can make the result inconclusive. Component timings are host elapsed time, including waits, rather than GPU execution time. Rendering telemetry has separately disclosed boundaries; unavailable network/drop counters are not estimated.
+
+Quality, movement, switching, source resize and filter recreation are confirmed separately. Share only the terminal summary; complete logs, samples, backup receipts and personal paths stay local. When reporting a problem, include the OBS version, GPU/driver, requested/effective processor and exact error.
+
+## Accepted result and current limits
+
+On OBS 32.2.2, Ryzen 7 5800X3D (16 logical processors), RX 9070 XT driver 32.0.31041.3013 and Windows build 26300, the four valid blocks reported:
+
+| GPU image processing | Mean OBS CPU | Range of the two block means |
+| --- | --- | --- |
+| OFF | 7.74% | 7.47–8.02% |
+| ON | 1.68% | 1.65–1.72% |
+
+This is **6.06 percentage points / 78.27% relative reduction** on that scene, with DirectML inference and similarity OFF in both modes. Source readback fell from 1280×720 to 256×144: 25 times fewer pixels per captured frame. The owner confirmed mask/hair/edge quality while moving their head, switching without crashes, resize alignment and filter recreation. It is not a performance guarantee for other machines, games or scenes.
+
+| Verification | Result |
 | --- | --- |
-| Source final assinado/DCO e reviews completos | Pendente |
-| Check/Windows CI, PS5.1 e package/origin exatos | Pendente |
-| ZIP final descarregado e hashes verificados | Pendente |
-| Qualidade/lifecycle RX 9070 XT | Pendente |
-| CPU OFF/ON controlada | Pendente |
-| Similaridade habitual preservada, se aplicável | Pendente |
-| Rendering/dropped-frame evidência disponível | Pendente |
+| Signed implementation and source reviews | Complete at `8da27a2557c3b89854f48df702888c94557c720d` |
+| Exact Windows CI, PowerShell 5.1 and package origins | Passed |
+| Preview downloads and hashes | Verified publicly without authentication |
+| RX 9070 XT quality and short lifecycle test | Accepted |
+| Controlled CPU OFF/ON comparison, similarity OFF | Observed improvement |
+| Full PR #3 matrix | Successful; macOS Intel package scenario skipped by workflow |
+| Similarity-ON controlled performance | Not measured |
+| Rendering/dropped-frame evidence | Zero lag in reported intervals; network/drop evidence unavailable |
+| Long-duration livestreams, broader AMD/Windows compatibility, eligible GPU fault tests | Not established |
 
-Nenhum merge, release ou redução substancial de CPU é registado por este documento.
+Linux/macOS retain the existing standalone ONNX Runtime path. This release distributes Windows x64 files only. The original automatic Release CD rejected the preview tag suffix before build/upload; the manual release and its downloads are verified. Its recorded failure must not be mistaken for a failed plugin build. See the [publication record](windows-ml-amd-release.md).
