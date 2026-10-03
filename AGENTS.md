@@ -45,6 +45,7 @@ These instructions apply to the entire repository.
 - The approved architecture is in `docs/superpowers/specs/2026-08-24-windows-ml-amd-design.md`.
 - Hardware evidence and comparisons are in `docs/windows-ml-baseline.md`, `docs/windows-ml-provider-discovery.md`, and `docs/windows-ml-inference-comparison.md`.
 - The accepted GPU image-processing OBS comparison and separate Image Similarity observation are in `docs/windows-ml-gpu-image-processing-acceptance.md`; its measured reduction applies with Image Similarity OFF.
+- The owner-authorized fork PR and downloadable Windows preview, asset verification and automatic release workflow limitation are recorded in `docs/windows-ml-amd-release.md`.
 - Treat the handoff as a snapshot: verify branch heads, CI state, package contents, and external documentation before relying on drift-prone facts.
 
 ## Documentation lookup

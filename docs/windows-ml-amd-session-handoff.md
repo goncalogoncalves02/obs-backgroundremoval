@@ -8,17 +8,17 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 Snapshot date: 2026-10-03
 
-This document is the durable entry point for continuing the Windows ML AMD work. Sprint 6 source reviews, exact-head Windows CI, independent package inspection, production-core CPU/DirectML/MIGraphX hardware checks, and the owner's combined CPU → DirectML → CPU OBS acceptance have passed. MediaPipe DirectML is now usable on the tested RX 9070 XT setup. Verify live branches, CI and artifact availability before resuming; this is an acceptance snapshot, not a release or deployment record.
+This document is the durable entry point for continuing the Windows ML AMD work. Sprint 6 source reviews, exact-head Windows CI, independent package inspection, production-core CPU/DirectML/MIGraphX hardware checks, and the owner's combined CPU → DirectML → CPU OBS acceptance have passed. GPU image processing is also accepted on the owner's tested RX 9070 XT setup and published as a Windows preview. Verify live branches, CI and download availability before resuming; stable release and integration gates remain separate.
 
 ## Current repository and branch state
 
 - Repository: `goncalogoncalves02/obs-backgroundremoval`.
-- Durable documentation branch: `GPU`; before this owner-acceptance documentation update its head was `f9bbf21c8a74285aa36151e0fb140b48cc207ba2`.
+- Durable documentation branch: `GPU`; before this preview-publication documentation update its head was `4321a7e030c12c9b88fec751df626e9e8ef3a7f5`.
 - Accepted Sprint 6 implementation: `feature/windows-ml-amd-sprint-6`, source `a390fcb4f2f6cdd9beba14e3024edc41b7860cc0`.
 - [PR #2](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/2) remains open and draft, with `windows-only-ci` and `upload-artifacts` at this snapshot.
 - Production-core hardware evidence uses `5f1b52fcb521825014e5dff5d5289ee82a8c66e4`; the later accepted source adds the bounded CPU/DirectML selector/status and Portuguese locale packaging without changing that backend.
 - Accepted Sprint 5 remains on `feature/windows-ml-amd` at `74b0498d197288e54f932b818bb9e857b984db7f`; [PR #1](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/1) remains draft.
-- `main` remains `9772c540279cc84b8c5be5442c50ccb00b399a6e` and has not received either feature. No merge, public release or deployment is recorded.
+- `main` remains `9772c540279cc84b8c5be5442c50ccb00b399a6e` and has not received the feature. [PR #3](https://github.com/goncalogoncalves02/obs-backgroundremoval/pull/3) is open from the accepted image-processing branch into this fork's `main`. A [Windows preview release](windows-ml-amd-release.md) is published at the accepted source; no merge or stable release is recorded.
 - This `GPU` change contains documentation only. Preserve the owner's untracked files, including `.aws`; do not inspect, stage, rewrite or delete them.
 
 ## GPU image processing delivery and owner acceptance
@@ -40,7 +40,7 @@ Deliver exactly one [reviewed handoff ZIP](https://github.com/goncalogoncalves02
 
 Close OBS and run the extracted installer in administrator PowerShell. It preserves the actual previous tree and receipt outside OBS search paths; `-Acao Restaurar` restores that prior version. Reopen OBS with MediaPipe + GPU DirectML, then run the extracted comparison script. The saved GPU image-processing checkbox defaults OFF; OFF and ON both retain DirectML inference. The script guides OFF → ON → ON → OFF, with 5 seconds settling and 15 seconds actual process-CPU measurement per block, plus bounded post-end log observation separately disclosed. CPU reads use actual acquisition timestamps and logical-processor normalization; late/slow reads, missing closing logs, fallback, changed settings/source/process or incomplete records make the comparison inconclusive. Host timing and OBS telemetry intervals are disclosed separately; unavailable network-drop counters are not invented. No statistically established or substantial saving is promised.
 
-Owner comparison and visual/motion/lifecycle acceptance are now recorded; keep complete logs local. The tested usage configuration is MediaPipe + GPU DirectML, GPU image processing ON, Image Similarity OFF. Further similarity optimization needs a separately agreed scope. This handoff and acceptance update are documentation only on `GPU`, with no feature code copied, merge, release, or owner installation performed here. Native Linux/macOS, explicit eligible DirectML allocation-failure testing and long-duration streaming remain separate verification limits.
+Owner comparison and visual/motion/lifecycle acceptance are now recorded; keep complete logs local. The tested usage configuration is MediaPipe + GPU DirectML, GPU image processing ON, Image Similarity OFF. Further similarity optimization needs a separately agreed scope. The owner subsequently requested fork PR #3 and a downloadable Windows preview, now published with the same verified ZIP and instructions; see the [publication record](windows-ml-amd-release.md), including fresh PR check status and the inherited automatic release tag-validation failure. Documentation updates on `GPU` copy no feature code. No merge or owner installation is performed here. Explicit eligible DirectML allocation-failure testing, long-duration streaming and completion of the fresh macOS PR checks remain separate verification limits.
 
 ## Current acceptance and scope
 
@@ -229,5 +229,5 @@ Only the sanitized plugin lines and necessary hardware/version facts are retaine
 1. Reconcile `AGENTS.md`, this handoff, the current GPU image-processing ledger, worktrees and diffs. Preserve owner files, accepted Sprint 5/Sprint 6 heads and the accepted image-processing source/results; do not restart completed implementation or historical hardware checks.
 2. Verify the signed documentation-only `GPU` publication/readback, live branch heads, PR draft state, exact-SHA CI and artifact availability. Artifact retention is finite.
 3. Continue using MediaPipe with DirectML or CPU on the accepted setup. Consult the immutable UI usage guide and integration record when diagnosing effective-provider status; MIGraphX remains optional without a selector.
-4. Obtain new owner direction and any required design approval before implementing the next sprint or expanding UI/models. This acceptance does not authorize merge, public release or deployment.
-5. Before integration/release, run the full native platform matrix, including removal of the quota-conservation label for that run. Clean-machine installation, long-duration stability, recording and broader GPU/model verification remain release gates. The short live switching/recreation check and 64 native adapter lifecycles do not replace them.
+4. Obtain new owner direction and any required design approval before implementing the next sprint or expanding UI/models. The owner explicitly authorized the fork PR and Windows preview publication; merge, stable release and broader deployment are not requested.
+5. Before integration/stable release, complete the full native platform matrix. PR #3's actual opening event started that full matrix despite the subsequently applied quota-conservation label: Windows, Linux builds and package scenarios passed; macOS remains in progress at this snapshot. Clean-machine installation, long-duration stability, recording and broader GPU/model verification remain separate gates. The Windows preview, short live switching/recreation check and 64 native adapter lifecycles do not replace them.
