@@ -34,7 +34,19 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
   add_test(NAME gpu-image-pipeline COMMAND gpu-image-pipeline)
   set_tests_properties(gpu-image-pipeline PROPERTIES TIMEOUT 60)
 
-  add_executable(gpu-image-processing-native native-main.cpp input-test.cpp graphics-faults.cpp)
+  add_executable(
+    gpu-image-processing-native
+    native-main.cpp
+    input-test.cpp
+    graphics-faults.cpp
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-image-policy.cpp"
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-input-preprocessor.cpp"
+  )
+  # Source properties are scoped to this tests directory: the plugin's compilation is untouched.
+  set_source_files_properties(
+    "${GPU_IMAGE_SOURCE_DIR}/gpu-input-preprocessor.cpp"
+    PROPERTIES COMPILE_OPTIONS "/FI${CMAKE_CURRENT_SOURCE_DIR}/graphics-faults.hpp"
+  )
   target_include_directories(gpu-image-processing-native PRIVATE "${GPU_IMAGE_SOURCE_DIR}")
   target_compile_features(gpu-image-processing-native PRIVATE cxx_std_20)
   target_link_libraries(

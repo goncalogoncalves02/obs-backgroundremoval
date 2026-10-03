@@ -8,9 +8,7 @@
 #include <stdexcept>
 #include <string>
 
-#if __has_include("gpu-input-preprocessor.hpp")
 void run_input_cases(const std::filesystem::path &effect_root);
-#endif
 
 static bool print_adapter(void *, const char *name, uint32_t id)
 {
@@ -47,12 +45,7 @@ int main(int argc, char **argv)
 		entered = true;
 		std::cout << "graphics-ready backend=" << gs_get_device_name() << std::endl;
 		gs_enum_adapters(print_adapter, nullptr);
-#if __has_include("gpu-input-preprocessor.hpp")
 		run_input_cases(effect_root);
-#else
-		// TEST-ONLY RED checkpoint. Remove this guard when implementation begins.
-		throw std::runtime_error("Expected implementation-absence RED: GpuInputPreprocessor is missing");
-#endif
 		gs_leave_context();
 		entered = false;
 		gs_destroy(graphics);

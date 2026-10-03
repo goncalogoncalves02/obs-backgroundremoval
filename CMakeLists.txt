@@ -306,7 +306,13 @@ target_sources(
 
 if(WIN32)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE windows-ml-session-core)
-  target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/obs-utils/gpu-image-policy.cpp src/obs-utils/gpu-image-pipeline.cpp)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}
+    PRIVATE
+      src/obs-utils/gpu-image-policy.cpp
+      src/obs-utils/gpu-image-pipeline.cpp
+      src/obs-utils/gpu-input-preprocessor.cpp
+  )
 endif()
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTORCC ON)
@@ -348,6 +354,10 @@ set(
   data/effects/kawase_blur.effect
   data/effects/mask_alpha_filter.effect
 )
+
+if(WIN32)
+  list(APPEND EFFECTS_FILES data/effects/input_downscale.effect)
+endif()
 
 set(
   LOCALE_FILES

@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+sampler_state linearClamp {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v)
+{
+	v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+	return v;
+}
+
+float4 PSDownscale(VertData v) : TARGET
+{
+	return image.Sample(linearClamp, v.uv);
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v);
+		pixel_shader = PSDownscale(v);
+	}
+}

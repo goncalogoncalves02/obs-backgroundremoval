@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// The temporary checkpoint compiles graphics setup without pretending to implement this interface.
-#if __has_include("gpu-input-preprocessor.hpp")
 #include "gpu-input-preprocessor.hpp"
 #include "graphics-fault-controls.hpp"
 #include <opencv2/imgproc.hpp>
@@ -102,7 +100,15 @@ static void reference_case(Dimensions dimensions, bool similarity, const std::st
 	GpuInputPreprocessor processor;
 	require(processor.prepare(config, effect.c_str()), "GPU input preparation failed");
 	const FrameStamp stamp{config.generation, 1, dimensions, config.input};
+	const bool original_framebuffer_srgb = gs_framebuffer_srgb_enabled();
+	const bool original_linear_srgb = gs_get_linear_srgb();
+	gs_enable_framebuffer_srgb(true);
+	gs_set_linear_srgb(true);
 	auto packet = processor.capture(source.texture, stamp, similarity);
+	require(gs_framebuffer_srgb_enabled() && gs_get_linear_srgb(),
+		"GPU input capture must restore the caller's sRGB state");
+	gs_enable_framebuffer_srgb(original_framebuffer_srgb);
+	gs_set_linear_srgb(original_linear_srgb);
 	require(packet.has_value(), "GPU capture failed");
 	require(packet->stamp.generation == stamp.generation && packet->stamp.frame_id == stamp.frame_id &&
 			packet->stamp.source == stamp.source && packet->stamp.input == stamp.input,
@@ -226,14 +232,32 @@ void run_input_cases(const std::filesystem::path &effect_root)
 	std::cout << "case resize_and_repeated_release" << std::endl;
 	// Same object must discard/recreate only the affected resources on source resize.
 	GpuInputPreprocessor processor;
+	uint64_t generation = 1;
 	for (const auto size : {Dimensions{1280, 720}, Dimensions{1920, 1080}, Dimensions{641, 359}}) {
-		const auto config = config_for(size);
+		auto config = config_for(size);
+		config.image_similarity = true;
+		config.generation = ++generation;
 		require(processor.prepare(config, effect.c_str()), "Resize prepare failed");
-		SourceTexture source(deterministic_input(size));
-		require(processor.capture(source.texture, {1, 1, size, config.input}, false).has_value(),
-			"Resize capture failed");
+		const auto input = deterministic_input(size);
+		SourceTexture source(input);
+		const FrameStamp stamp{config.generation, 1, size, config.input};
+		auto packet = processor.capture(source.texture, stamp, true);
+		require(packet.has_value(), "Resize capture failed");
+		require(packet->stamp.generation == stamp.generation && packet->stamp.frame_id == stamp.frame_id &&
+				packet->stamp.source == stamp.source && packet->stamp.input == stamp.input,
+			"Resized capture provenance must match the current config");
+		require(packet->input_bgra.type() == CV_8UC4 && packet->input_bgra.cols == 256 &&
+				packet->input_bgra.rows == 144,
+			"Resized capture must retain the exact model input size");
+		const auto reference = prepared_input(input);
+		require(cv::norm(reference, prepared_input(packet->input_bgra), cv::NORM_L1) /
+					static_cast<double>(reference.total() * 3) <=
+				0.01,
+			"Resized capture must retain prepared-input quality");
+		require(packet->similarity_bgra.size() == input.size() &&
+				cv::norm(packet->similarity_bgra, input, cv::NORM_INF) == 0,
+			"Resized similarity staging must contain the current full image");
 	}
 	processor.release();
 	processor.release();
 }
-#endif
