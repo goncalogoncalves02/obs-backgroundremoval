@@ -33,4 +33,27 @@ if(NOT GPU_IMAGE_PROCESSING_POLICY_ONLY)
   target_link_libraries(gpu-image-pipeline PRIVATE BuildOptions OpenCV::opencv_core)
   add_test(NAME gpu-image-pipeline COMMAND gpu-image-pipeline)
   set_tests_properties(gpu-image-pipeline PROPERTIES TIMEOUT 60)
+
+  add_executable(gpu-image-processing-native native-main.cpp input-test.cpp graphics-faults.cpp)
+  target_include_directories(gpu-image-processing-native PRIVATE "${GPU_IMAGE_SOURCE_DIR}")
+  target_compile_features(gpu-image-processing-native PRIVATE cxx_std_20)
+  target_link_libraries(
+    gpu-image-processing-native
+    PRIVATE BuildOptions OBS::libobs OpenCV::opencv_core OpenCV::opencv_imgproc
+  )
+  add_custom_command(
+    TARGET gpu-image-processing-native
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:gpu-image-processing-native>
+      $<TARGET_FILE_DIR:gpu-image-processing-native>
+    COMMAND_EXPAND_LISTS
+  )
+  add_test(
+    NAME gpu-image-processing-native
+    COMMAND
+      gpu-image-processing-native --effect-root "${PROJECT_SOURCE_DIR}/data/effects" --model
+      "${PROJECT_SOURCE_DIR}/data/models/mediapipe.onnx"
+  )
+  set_tests_properties(gpu-image-processing-native PROPERTIES TIMEOUT 300)
 endif()

@@ -1,0 +1,69 @@
+// SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <graphics/graphics.h>
+
+#include <filesystem>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+
+#if __has_include("gpu-input-preprocessor.hpp")
+void run_input_cases(const std::filesystem::path &effect_root);
+#endif
+
+static bool print_adapter(void *, const char *name, uint32_t id)
+{
+	if (id == 0)
+		std::cout << "graphics-adapter index=" << id << " name=" << name << std::endl;
+	return true;
+}
+
+int main(int argc, char **argv)
+{
+	graphics_t *graphics = nullptr;
+	bool entered = false;
+	try {
+		std::filesystem::path effect_root, model;
+		for (int i = 1; i < argc; i += 2) {
+			if (i + 1 >= argc)
+				throw std::runtime_error("Missing option value");
+			if (std::string(argv[i]) == "--effect-root")
+				effect_root = argv[i + 1];
+			else if (std::string(argv[i]) == "--model")
+				model = argv[i + 1];
+			else
+				throw std::runtime_error("Unknown option");
+		}
+		if (!std::filesystem::is_directory(effect_root) || !std::filesystem::is_regular_file(model))
+			throw std::runtime_error("Explicit effect root and MediaPipe model are required");
+		const auto module = std::filesystem::absolute(argv[0]).parent_path() / "libobs-d3d11.dll";
+		std::cout << "graphics-create module=" << module.string() << std::endl;
+		const int status = gs_create(&graphics, module.string().c_str(), 0);
+		if (status != GS_SUCCESS)
+			throw std::runtime_error("Graphics backend unavailable: gs_create status=" +
+						 std::to_string(status));
+		gs_enter_context(graphics);
+		entered = true;
+		std::cout << "graphics-ready backend=" << gs_get_device_name() << std::endl;
+		gs_enum_adapters(print_adapter, nullptr);
+#if __has_include("gpu-input-preprocessor.hpp")
+		run_input_cases(effect_root);
+#else
+		// TEST-ONLY RED checkpoint. Remove this guard when implementation begins.
+		throw std::runtime_error("Expected implementation-absence RED: GpuInputPreprocessor is missing");
+#endif
+		gs_leave_context();
+		entered = false;
+		gs_destroy(graphics);
+		std::cout << "gpu-input-cases PASS" << std::endl;
+		return 0;
+	} catch (const std::exception &error) {
+		if (entered)
+			gs_leave_context();
+		if (graphics)
+			gs_destroy(graphics);
+		std::cerr << "gpu-input-cases FAIL: " << error.what() << std::endl;
+		return 1;
+	}
+}

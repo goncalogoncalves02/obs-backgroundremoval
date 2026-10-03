@@ -325,7 +325,7 @@ jobs:
           $env:Path = 'C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32;C:\Windows'
           & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
-          cmake --build build_obs --target obs-frontend-api --config Release --parallel
+          cmake --build build_obs --target obs-frontend-api libobs-d3d11 --config Release --parallel
           if ($LASTEXITCODE -ne 0) { throw 'Native command failed.' }
 
       - name: Install OBS Studio (Windows)
@@ -442,6 +442,28 @@ jobs:
           $env:Path = "$CMAKE_BINDIR;$env:Path"
           ctest --test-dir build -C RelWithDebInfo -R '^gpu-image-(policy|pipeline)$' --output-on-failure --no-tests=error
           if ($LASTEXITCODE -ne 0) { throw 'GPU image policy/packet tests failed.' }
+
+      - name: Test GPU image native graphics (Windows)
+        shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
+        env:
+          OBS_DEPS_PREFIX: ${{ steps.setup-buildspec-deps.outputs.OBS_DEPS_PREFIX }}
+          PYTHON_COMMAND: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          $LAUNCH_DEVSHELL = Join-Path (vswhere -version '[18,19)' -property installationPath) 'Common7' 'Tools' 'Launch-VsDevShell.ps1'
+          & $LAUNCH_DEVSHELL -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $VCPKG_COMMAND = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
+          $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
+          $env:Path = "$CMAKE_BINDIR;$env:Path"
+          & $env:PYTHON_COMMAND tests/GpuImageProcessing/test_graphics_runtime_staging.py
+          if ($LASTEXITCODE -ne 0) { throw 'Graphics runtime staging fixtures failed.' }
+          ./tests/GpuImageProcessing/stage-graphics-runtime.ps1 `
+            -ObsBuildDirectory (Join-Path $env:GITHUB_WORKSPACE 'build_obs') `
+            -ObsDepsPrefix $env:OBS_DEPS_PREFIX `
+            -VcpkgBinDirectory (Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed/$env:VCPKG_TARGET_TRIPLET/bin") `
+            -TestDirectory (Join-Path $env:GITHUB_WORKSPACE 'build/tests/GpuImageProcessing')
+          ctest --test-dir build -C RelWithDebInfo -R '^gpu-image-processing-native$' --output-on-failure --no-tests=error --verbose --interactive-debug-mode 0
+          if ($LASTEXITCODE -ne 0) { throw 'Native graphics tests failed; graphics deployment is a required gate.' }
 
       - name: Package dll artifact (Windows)
         shell: pwsh -Command "Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
