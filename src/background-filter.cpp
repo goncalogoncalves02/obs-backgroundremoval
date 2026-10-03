@@ -33,7 +33,6 @@
 #include <exception>
 #include <new>
 #include <fstream>
-#include <new>
 #include <mutex>
 #include <regex>
 #include <thread>
@@ -987,8 +986,21 @@ static void image_tick(const std::shared_ptr<background_removal_filter> &tf)
 				    similarityHistory.size() == similarity.size() &&
 				    cv::PSNR(similarityHistory, similarity) > config.similarity_threshold;
 	cv::Mat nextSimilarity;
-	if (config.image_similarity && !similaritySkip)
-		nextSimilarity = similarity.clone();
+	if (config.image_similarity && !similaritySkip) {
+		try {
+			nextSimilarity = similarity.clone(); // full compatibility copy outside the state gate
+		} catch (const cv::Exception &) {
+			if (!gpu)
+				throw; // preserve the existing CPU processing exception contract
+			image_fail(*tf, config.generation, "similarity-history-copy-failed");
+			return;
+		} catch (const std::bad_alloc &) {
+			if (!gpu)
+				throw;
+			image_fail(*tf, config.generation, "similarity-history-copy-failed");
+			return;
+		}
+	}
 	{
 		std::lock_guard stateLock(tf->imageStateMutex);
 		if (!image_current(*tf, packet.stamp)) {

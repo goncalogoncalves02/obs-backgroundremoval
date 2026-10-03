@@ -1,7 +1,8 @@
 ﻿# SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]
-param([string]$ScriptPath=(Join-Path $PSScriptRoot '../../scripts/testar-processamento-gpu.ps1'))
+param([string]$ScriptPath)
+if (-not $ScriptPath) { $ScriptPath=Join-Path $PSScriptRoot '../../scripts/testar-processamento-gpu.ps1' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 foreach ($path in @($ScriptPath,(Join-Path $PSScriptRoot 'measurement-test.ps1'))) {
@@ -63,7 +64,7 @@ function Get-Process([int]$Id) {
 }
 function Read-GpuFreshLog($Reader,[double]$Now) {
     $next=5*($Reader.Records.Count)
-    if ($Now -ge $next -and $next -le 20) {
+    if ($Now -ge $next -and $next -le 25) {
         $record=Record $next $true; $record.ReceivedAt=$Now
         if ($script:late) {$record.EmittedAt=$Now-3}
         if ($script:fallback -and $Now -ge 10) {$record.Fields.state='CpuProcessingFallback';$record.Fields.reason='processing-failed'}
@@ -71,7 +72,7 @@ function Read-GpuFreshLog($Reader,[double]$Now) {
     }
 }
 function FakeReader {
-    [pscustomobject]@{Records=(New-Object 'System.Collections.Generic.List[object]');Errors=(New-Object 'System.Collections.Generic.List[object]')}
+    [pscustomobject]@{Pending='';Records=(New-Object 'System.Collections.Generic.List[object]');Errors=(New-Object 'System.Collections.Generic.List[object]')}
 }
 $reader=FakeReader; $ready=Record 0 $true; $reader.Records.Add($ready)
 $block=Invoke-GpuBlock $reader $script:clock $ready $true 0 101 $script:processStart.Ticks 16
@@ -90,3 +91,5 @@ $script:late=$false;$script:stall=$true;$script:clock.Elapsed.TotalSeconds=0.001
 $block=Invoke-GpuBlock $reader $script:clock $ready $true 0 101 $script:processStart.Ticks 16
 Check (-not (Test-GpuProcessingBlock $block)) 'Production collector fabricated once-per-second CPU after scheduler stall.'
 'collector real ingestion and synthetic timing/process/status PASS'
+
+& (Join-Path $PSScriptRoot 'collector-boundary-test.ps1') -ScriptPath $ScriptPath

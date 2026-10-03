@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]
 param(
-    [string]$InstallerPath=(Join-Path $PSScriptRoot '../../scripts/instalar-processamento-gpu.ps1.in'),
+    [string]$InstallerPath,
     [Parameter(Mandatory)][string]$PluginZip
 )
+if (-not $InstallerPath) { $InstallerPath=Join-Path $PSScriptRoot '../../scripts/instalar-processamento-gpu.ps1.in' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 if (-not (Test-Path -LiteralPath $InstallerPath)) { throw 'Task6 expected RED: installer template absent.' }

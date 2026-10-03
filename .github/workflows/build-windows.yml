@@ -446,7 +446,7 @@ jobs:
           $CMAKE_BINDIR = & $VCPKG_COMMAND fetch cmake | Select-Object -Last 1 | Split-Path -Parent
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the existing CMake toolchain.' }
           $env:Path = "$CMAKE_BINDIR;$env:Path"
-          ctest --test-dir build -C RelWithDebInfo -R '^gpu-image-(policy|pipeline)$' --output-on-failure --no-tests=error
+          ctest --test-dir build -C RelWithDebInfo -R '^gpu-image-(policy|pipeline|mask-comparison)$' --output-on-failure --no-tests=error
           if ($LASTEXITCODE -ne 0) { throw 'GPU image policy/packet tests failed.' }
 
       - name: Test GPU image native graphics and filter lifecycle (Windows)

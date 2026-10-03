@@ -16,3 +16,4 @@ scripts/package_gpu_image_handoff.py text eol=lf
 tests/GpuImageProcessing/measurement-test.ps1 text eol=lf
 tests/GpuImageProcessing/collector-test.ps1 text eol=lf
 tests/GpuImageProcessing/installer-test.ps1 text eol=lf
+tests/GpuImageProcessing/collector-boundary-test.ps1 text eol=lf

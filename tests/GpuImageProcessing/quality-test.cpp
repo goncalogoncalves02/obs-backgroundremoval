@@ -5,6 +5,7 @@
 #include "gpu-input-preprocessor.hpp"
 #include "gpu-mask-processor.hpp"
 #include "filter-boundaries.hpp"
+#include "mask-comparison.hpp"
 #include "ort-utils/ort-session-utils.hpp"
 #include "models/ModelMediapipe.hpp"
 #include "consts.h"
@@ -32,16 +33,16 @@ void mask_contract(const cv::Mat &mask, Dimensions size, const std::string &name
 		name + ": mask dimensions/type");
 	double minimum = 0, maximum = 0;
 	cv::minMaxLoc(mask, &minimum, &maximum);
-	const auto foreground = cv::countNonZero(mask > 128);
+	const auto foreground = cv::countNonZero(mask < 128);
 	std::cout << "quality-mask boundary=" << name << " dimensions=" << mask.cols << 'x' << mask.rows << " range=["
-		  << minimum << ',' << maximum << "] foreground=" << foreground
-		  << " background=" << mask.total() - static_cast<size_t>(foreground) << std::endl;
+		  << minimum << ',' << maximum << "] retained-alpha-foreground=" << foreground
+		  << " non-retained-background=" << mask.total() - static_cast<size_t>(foreground) << std::endl;
 	require(std::isfinite(minimum) && std::isfinite(maximum) && minimum >= 0 && maximum <= 255,
 		name + ": finite bounded byte mask");
 }
 void nondegenerate(const cv::Mat &mask, const std::string &name, double minimum_fraction)
 {
-	const double foreground = cv::countNonZero(mask > 128);
+	const double foreground = cv::countNonZero(mask < 128);
 	const double total = static_cast<double>(mask.total());
 	require(foreground >= minimum_fraction * total && total - foreground >= minimum_fraction * total,
 		name + ": real portrait requires foreground and background");
@@ -167,19 +168,13 @@ bool compare(const cv::Mat &candidate, const cv::Mat &reference, Dimensions size
 	mask_contract(reference, size, name + "/reference");
 	mask_contract(candidate, size, name + "/candidate");
 	nondegenerate(reference, name, 0.000001);
-	cv::Mat intersection, either;
-	cv::bitwise_and(candidate > 128, reference > 128, intersection);
-	cv::bitwise_or(candidate > 128, reference > 128, either);
-	const int union_pixels = cv::countNonZero(either);
-	require(union_pixels > 0, name + ": no vacuous portrait IoU");
-	const double mae =
-		cv::norm(candidate, reference, cv::NORM_L1) / (static_cast<double>(reference.total()) * 255.0);
-	const double iou = static_cast<double>(cv::countNonZero(intersection)) / union_pixels;
+	const auto metrics = gpu_test::compare_masks(candidate, reference);
 	std::cout << "quality-result case=" << name << " provider=CPUExecutionProvider helper-eligibility=test-input"
 		  << " dimensions=" << size.width << 'x' << size.height << " prepared-input-mae=" << prepared_mae
-		  << " final-normalized-mae=" << mae << " foreground-iou=" << iou << std::endl;
-	return std::isfinite(prepared_mae) && prepared_mae <= 0.01 && std::isfinite(mae) && mae <= 0.01 &&
-	       std::isfinite(iou) && iou >= 0.98;
+		  << " final-normalized-mae=" << metrics.normalized_mae
+		  << " retained-alpha-iou=" << metrics.retained_alpha_iou
+		  << " positive-background-iou=" << metrics.positive_background_iou << std::endl;
+	return std::isfinite(prepared_mae) && prepared_mae <= 0.01 && metrics.passes(true);
 }
 cv::Mat gpu_finish(GpuMaskProcessor &processor, const cv::Mat &small, Dimensions source, const MaskSettings &settings,
 		   uint64_t frame_id)

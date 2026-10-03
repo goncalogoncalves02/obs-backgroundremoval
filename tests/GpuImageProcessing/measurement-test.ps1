@@ -1,7 +1,8 @@
 ﻿# SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]
-param([string]$ScriptPath = (Join-Path $PSScriptRoot '../../scripts/testar-processamento-gpu.ps1'))
+param([string]$ScriptPath)
+if (-not $ScriptPath) { $ScriptPath=Join-Path $PSScriptRoot '../../scripts/testar-processamento-gpu.ps1' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $ScriptPath)) { throw 'Task6 expected RED: measurement script absent.' }
@@ -37,12 +38,12 @@ function Record([double]$At,[bool]$On) {
 function Block([bool]$On,[double]$Start=0,[double]$Cpu=3) {
     $samples = @(); for ($i=0; $i -le 20; $i++) {
         $seconds = $i * $Cpu/100 * 16
-        $samples += [pscustomobject]@{ At=($Start+$i); CpuSeconds=$seconds; Pid=101; StartTicks=98765 }
+        $samples += [pscustomobject]@{ At=($Start+$i); QueryStart=($Start+$i); QueryEnd=($Start+$i); AcquisitionSeconds=0.0; CpuSeconds=$seconds; Pid=101; StartTicks=98765 }
     }
     [pscustomobject]@{
         On=$On; Start=$Start; MeasureStart=($Start+5); End=($Start+20); LogicalProcessors=16; Samples=$samples
         Records=@((Record ($Start) $On),(Record ($Start+5) $On),(Record ($Start+10) $On),(Record ($Start+15) $On),(Record ($Start+20) $On))
-        Errors=@(); FilterId='1'; Similarity=0; CpuPercentage=$Cpu; Valid=$true
+        ObservationEnd=($Start+21); Errors=@(); FilterId='1'; Similarity=0; CpuPercentage=$Cpu; Valid=$true
     }
 }
 $off = Block $false

@@ -16,6 +16,7 @@ public:
 	static inline thread_local int remaining = -1;
 	static inline thread_local unsigned allocations = 0;
 	static inline thread_local int matched_type = -1;
+	static inline thread_local bool throw_cv = false;
 	cv::UMatData *allocate(int dims, const int *sizes, int type, void *data, size_t *step, cv::AccessFlag flags,
 			       cv::UMatUsageFlags usage) const override
 	{
@@ -23,8 +24,11 @@ public:
 			++allocations;
 			if (auto callback = std::exchange(before_allocate, {}))
 				callback();
-			if (remaining == 0)
+			if (remaining == 0) {
+				if (throw_cv)
+					CV_Error(cv::Error::StsNoMem, "Injected compatibility allocation failure");
 				throw std::bad_alloc();
+			}
 			if (remaining > 0)
 				--remaining;
 		}
@@ -38,11 +42,13 @@ public:
 };
 class MatAllocationScope {
 public:
-	explicit MatAllocationScope(int after = 0, int type = -1) : previous_(cv::Mat::getDefaultAllocator())
+	explicit MatAllocationScope(int after = 0, int type = -1, bool cv_exception = false)
+		: previous_(cv::Mat::getDefaultAllocator())
 	{
 		static MatAllocationFault allocator;
 		MatAllocationFault::remaining = after;
 		MatAllocationFault::matched_type = type;
+		MatAllocationFault::throw_cv = cv_exception;
 		MatAllocationFault::allocations = 0;
 		cv::Mat::setDefaultAllocator(&allocator);
 	}
@@ -52,6 +58,7 @@ public:
 		MatAllocationFault::before_allocate = {};
 		MatAllocationFault::remaining = -1;
 		MatAllocationFault::matched_type = -1;
+		MatAllocationFault::throw_cv = false;
 	}
 	MatAllocationScope(const MatAllocationScope &) = delete;
 	MatAllocationScope &operator=(const MatAllocationScope &) = delete;

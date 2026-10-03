@@ -25,13 +25,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downlo
 
 O instalador verifica os bytes exatos do ZIP e todos os ficheiros instalados, preservando a build e o recibo anteriores fora das pastas de plugins. Não adquire providers. Para repor a instalação anterior, fecha OBS e executa o primeiro comando com **-Acao Restaurar**.
 
-O script guia OFF → ON → ON → OFF. Cada bloco dura 20 segundos: cinco para estabilizar e quinze medidos. Os prompts pedem alterações manuais na checkbox; o script valida os estados efetivos nos logs. Mantém iluminação, movimento, resolução/FPS, definições da máscara e restante carga iguais.
+O script guia OFF → ON → ON → OFF. Cada bloco dura 20 segundos: cinco para estabilizar e quinze medidos. Depois desses vinte segundos, observa os logs durante até 6,2 segundos adicionais para confirmar telemetria que cubra o fim e recolher falhas tardias; esse tempo não entra na medição CPU. Os prompts pedem alterações manuais na checkbox; o script valida os estados efetivos nos logs. Mantém iluminação, movimento, resolução/FPS, definições da máscara e restante carga iguais.
 
 A comparação padrão pede Similaridade de imagem desligada nos dois modos e recorda a opção anterior para a repores. Se usas normalmente similaridade, repete o segundo comando com **-ManterSimilaridade**; esse resultado é guardado e relatado separadamente.
 
 ## Como ler o resultado
 
 CPU normalizada = 100 × delta de segundos CPU / (segundos monotónicos decorridos × processadores lógicos). Por exemplo, um segundo de CPU em dez segundos com dezasseis processadores lógicos corresponde a 0,625%.
+
+Cada amostra CPU regista o início/fim e a duração da leitura real do sistema. Uma aquisição acima de 50 ms ou um desvio acima de 50 ms da janela programada invalida o bloco; os limites CPU, de fecho de telemetria e de observação são apresentados separadamente.
 
 O resumo apresenta médias e intervalos dos blocos OFF/ON, diferença em pontos percentuais e alteração relativa em percentagem. Separação dos intervalos é uma melhoria observada nesta comparação sequencial, sem alegação de confiança estatística. Intervalos sobrepostos, restart, mudança de filtro/fonte/definições, logs incompletos/tardios ou fallback tornam o resultado inconclusivo.
 

@@ -742,6 +742,126 @@ void require_mailbox_failure_recovery(obs_source_t *filter, obs_source_t *source
 	process_frame(filter, source);
 	std::cout << "filter-mailbox real-allocation-fault/publication/read/cache/latch PASS" << std::endl;
 }
+void require_similarity_failure_recovery(obs_source_t *filter, obs_source_t *source, obs_data_t *settings,
+					 const std::shared_ptr<background_removal_filter> &tf)
+{
+	// This is called only after the real completed session selected DirectML.
+	for (unsigned operation = 0; operation < 3; ++operation) {
+		const bool obsolete = operation == 2;
+		obs_data_set_bool(settings, "enable_image_similarity", true);
+		obs_data_set_int(settings, "numThreads", 9 + operation);
+		background_filter_update(obs_obj_get_data(filter), settings);
+		process_frame(filter, source);
+		process_frame(filter, source);
+		on_obs_thread([&] {
+			const auto config = tf->imagePipeline.snapshot();
+			check(tf->sessionDiagnostics.effective_provider == "DmlExecutionProvider" &&
+				      tf->imagePipeline.processing_snapshot().mask_active,
+			      "Similarity allocation fixture needs actual DirectML and active GPU mask");
+			auto *session = tf->session.get();
+			const auto history = tf->imageHistory.clone();
+			const auto similarity = tf->imageSimilarityHistory.clone();
+			check(!history.empty() && !similarity.empty(), "Accepted similarity histories missing");
+			cv::Mat accepted;
+			{
+				GraphicsScope graphics;
+				accepted = display_pixels(tf->imageDisplayTexture);
+				auto *pixels = static_cast<SourceFixture *>(obs_obj_get_data(source));
+				cv::Mat changed(static_cast<int>(config.source.height),
+						static_cast<int>(config.source.width), CV_8UC4,
+						cv::Scalar(operation % 2 ? 0 : 255, 0, operation % 2 ? 255 : 0, 255));
+				const auto *bytes = changed.data;
+				auto *texture = gs_texture_create(config.source.width, config.source.height, GS_BGRA, 1,
+								  &bytes, 0);
+				check(texture != nullptr, "Changed actual similarity source allocation failed");
+				gs_texture_destroy(pixels->texture);
+				pixels->texture = texture;
+			}
+			draw(source);
+			unsigned packetCopies;
+			{
+				gpu_test::MatAllocationScope count(-1, CV_8UC4);
+				const auto frame = tf->imagePipeline.latest_frame();
+				packetCopies = gpu_test::MatAllocationFault::allocations;
+				check(frame && cv::PSNR(similarity, frame->similarity_bgra) <=
+						       config.similarity_threshold,
+				      "Changed actual source failed to reach compatibility history copy");
+			}
+			check(packetCopies > 0, "Real input mailbox copy was not exercised");
+			const auto errors = gpu_filter_test::error_count();
+			bool invalidated = false;
+			{
+				// Fail the compatibility clone, after the real mailbox copies. Exercise both narrow exceptions.
+				gpu_test::MatAllocationScope failure(static_cast<int>(packetCopies), CV_8UC4,
+								     operation == 1);
+				std::function<void()> before_copy;
+				if (obsolete) {
+					before_copy = [&] {
+						if (gpu_test::MatAllocationFault::allocations <= packetCopies) {
+							gpu_test::MatAllocationFault::before_allocate = before_copy;
+							return;
+						}
+						// Model -> state -> pipeline is the production lock order. No graphics/model acquisition here.
+						std::lock_guard stateLock(tf->imageStateMutex);
+						auto newer = tf->imagePipeline.snapshot();
+						newer.mask.feather += 0.01f;
+						tf->imagePipeline.configure(newer);
+						invalidated = true;
+					};
+					gpu_test::MatAllocationFault::before_allocate = before_copy;
+				}
+				image_tick(tf);
+			}
+			check(cv::norm(history, tf->imageHistory, cv::NORM_INF) == 0 &&
+				      cv::norm(similarity, tf->imageSimilarityHistory, cv::NORM_INF) == 0,
+			      "Failed compatibility copy advanced accepted histories");
+			const auto state = tf->imagePipeline.processing_snapshot();
+			check(tf->session.get() == session &&
+				      tf->sessionDiagnostics.effective_provider == "DmlExecutionProvider" &&
+				      tf->imageEffectiveProvider == "DmlExecutionProvider",
+			      "Compatibility failure changed inference truth");
+			if (obsolete) {
+				check(invalidated && state.generation > config.generation &&
+					      !tf->imageProcessingFailed &&
+					      state.state != gpu_image::ProcessingState::CpuProcessingFallback,
+				      "Obsolete compatibility failure poisoned newer authority");
+			} else {
+				check(state.state == gpu_image::ProcessingState::CpuProcessingFallback &&
+					      state.requested && !state.preprocess_active && !state.mask_active &&
+					      tf->imageProcessingFailed &&
+					      state.reason == "similarity-history-copy-failed",
+				      "Compatibility allocation failure did not latch processing-only fallback");
+				// No new CPU packet exists yet: this must not retry either optimized mailbox/history allocation.
+				{
+					gpu_test::MatAllocationScope repeated;
+					image_tick(tf);
+					check(gpu_test::MatAllocationFault::allocations == 0,
+					      "Latched compatibility failure retried optimized allocation");
+				}
+				check(tf->imagePipeline.snapshot().generation == state.generation &&
+					      gpu_filter_test::error_count() == errors,
+				      "Compatibility failure repeated transition/error log");
+			}
+			GraphicsScope graphics;
+			check(cv::norm(accepted, display_pixels(tf->imageDisplayTexture), cv::NORM_INF) == 0,
+			      "Compatibility failure destroyed accepted same-source display");
+		});
+		if (!obsolete) {
+			process_frame(filter, source);
+			check(tf->imagePipeline.processing_snapshot().state ==
+					      gpu_image::ProcessingState::CpuProcessingFallback &&
+				      tf->legacyMask && !tf->legacyMask->mask.empty(),
+			      "Compatibility fallback failed CPU mask processing");
+		}
+	}
+	obs_data_set_bool(settings, "enable_image_similarity", false);
+	obs_data_set_int(settings, "numThreads", 1);
+	background_filter_update(obs_obj_get_data(filter), settings);
+	process_frame(filter, source);
+	process_frame(filter, source);
+	std::cout << "filter-similarity real-allocation-fault/history/display/provider/latch/obsolete PASS"
+		  << std::endl;
+}
 void semantic_cases(obs_source_t *filter, obs_source_t *source, obs_data_t *settings,
 		    const std::shared_ptr<background_removal_filter> &tf)
 {
@@ -872,6 +992,7 @@ void semantic_cases(obs_source_t *filter, obs_source_t *source, obs_data_t *sett
 		process_frame(filter, source);
 		require_display_reuse(filter, source, tf);
 		require_mailbox_failure_recovery(filter, source, settings, tf);
+		require_similarity_failure_recovery(filter, source, settings, tf);
 		cv::Mat acceptedDisplay;
 		on_obs_thread([&] {
 			GraphicsScope graphics;

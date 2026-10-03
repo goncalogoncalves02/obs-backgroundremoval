@@ -71,8 +71,16 @@ function Test-GpuProcessingBlock([pscustomobject]$Block) {
             [Math]::Abs(($Block.MeasureStart-$Block.Start)-5) -gt 0.05 -or
             [Math]::Abs(($Block.End-$Block.MeasureStart)-15) -gt 0.05) { return $false }
         if ($Block.Samples.Count -ne 21) { return $false }
-        foreach ($sample in $Block.Samples) {
+        for ($i=0; $i -lt $Block.Samples.Count; $i++) {
+            $sample=$Block.Samples[$i]
             if ($sample.Pid -ne $Block.Samples[0].Pid -or $sample.StartTicks -ne $Block.Samples[0].StartTicks) { return $false }
+            foreach ($value in @($sample.At,$sample.QueryStart,$sample.QueryEnd,$sample.AcquisitionSeconds)) {
+                if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { return $false }
+            }
+            if ($sample.QueryStart -lt ($Block.Start+$i-0.001) -or $sample.QueryEnd -lt $sample.QueryStart -or
+                $sample.At -ne $sample.QueryEnd -or $sample.AcquisitionSeconds -lt 0 -or $sample.AcquisitionSeconds -gt 0.05 -or
+                [Math]::Abs($sample.AcquisitionSeconds-($sample.QueryEnd-$sample.QueryStart)) -gt 0.000001 -or
+                [Math]::Abs($sample.At-($Block.Start+$i)) -gt 0.05) { return $false }
         }
         $samples=@($Block.Samples | Where-Object { $_.At -ge $Block.MeasureStart -and $_.At -le $Block.End })
         if ($samples.Count -ne 16 -or [Math]::Abs($samples[0].At-$Block.MeasureStart) -gt 0.05 -or
@@ -84,12 +92,15 @@ function Test-GpuProcessingBlock([pscustomobject]$Block) {
         }
         $cpu=Get-BlockCpuPercentage $Block
         if ($cpu -gt 100.05) { return $false }
+        # CPU stops at End. A separate bounded observation closes telemetry and drains allowed late lines.
+        if ($Block.ObservationEnd -lt ($Block.End+1) -or $Block.ObservationEnd -gt ($Block.End+6.25)) { return $false }
         $records=@($Block.Records | Where-Object {
-            $_.ReceivedAt -ge $Block.Start -and $_.ReceivedAt -le ($Block.End+1) -and $_.Fields.filter_id -ceq $Block.FilterId
+            $_.ReceivedAt -ge $Block.Start -and $_.ReceivedAt -le $Block.ObservationEnd -and $_.Fields.filter_id -ceq $Block.FilterId
         })
         $stats=@($records | Where-Object { $_.Kind -eq 'stats' })
-        if ($stats.Count -lt 4 -or $stats[0].ReceivedAt -gt ($Block.Start+1) -or
-            $stats[-1].ReceivedAt -lt ($Block.End-6)) { return $false }
+        $closing=@($stats | Where-Object { $_.EmittedAt -ge $Block.End -and
+            $_.EmittedAt-[double]$_.Fields.interval_host_elapsed_ms/1000 -le $Block.End })
+        if ($stats.Count -lt 4 -or $stats[0].ReceivedAt -gt ($Block.Start+1) -or -not $closing.Count) { return $false }
         $first=$stats[0].Fields
         foreach ($record in $records) {
             $f=$record.Fields
@@ -233,11 +244,17 @@ function Assert-GpuInstalled([string]$ScriptPath,[string]$ReceiptPath,$Manifest)
     }
     return $receipt
 }
-function Get-GpuProcessSample([double]$At,[int]$ExpectedPid,[long]$ExpectedStartTicks) {
+function Get-GpuProcessSample($Clock,[int]$ExpectedPid,[long]$ExpectedStartTicks) {
+    $before=$Clock.Elapsed.TotalSeconds
     $process=Get-Process -Id $ExpectedPid -ErrorAction Stop
     $process.Refresh()
-    if ($process.StartTime.ToUniversalTime().Ticks -ne $ExpectedStartTicks -or $process.HasExited) { throw 'OBS reiniciado. Esta comparação é inconclusiva.' }
-    [pscustomobject]@{ At=$At; Pid=$process.Id; StartTicks=$process.StartTime.ToUniversalTime().Ticks; CpuSeconds=$process.TotalProcessorTime.TotalSeconds }
+    $startTicks=$process.StartTime.ToUniversalTime().Ticks
+    if ($process.Id -ne $ExpectedPid -or $startTicks -ne $ExpectedStartTicks -or $process.HasExited) { throw 'OBS reiniciado. Esta comparação é inconclusiva.' }
+    $cpu=$process.TotalProcessorTime.TotalSeconds
+    $after=$Clock.Elapsed.TotalSeconds
+    # Timestamp the acquired counter, not the scheduled query. Reject >50ms acquisition in block validation.
+    [pscustomobject]@{ At=$after; QueryStart=$before; QueryEnd=$after; AcquisitionSeconds=($after-$before)
+        Pid=$process.Id; StartTicks=$startTicks; CpuSeconds=$cpu }
 }
 function New-GpuLogReader([string]$Path,[datetime]$WallStart) {
     $item=Get-Item -LiteralPath $Path
@@ -267,9 +284,9 @@ function Read-GpuFreshLog($Reader,[double]$Now) {
         if ($line -match 'GPUImageProcessing ') {
             $record=ConvertFrom-GpuProcessingLine $line $Now $emitted
             if ($null -ne $record) { $Reader.Records.Add($record) }
-            else { $Reader.Errors.Add([pscustomobject]@{ At=$Now; Reason='malformed processing record' }) }
+            else { $Reader.Errors.Add([pscustomobject]@{ At=$Now; EmittedAt=$emitted; Reason='malformed processing record' }) }
         } elseif ($line -match '\[obs-backgroundremoval\]' -and $line -match '(?i)error|failed|exception|crash|outcome=(?!Ready)') {
-            $Reader.Errors.Add([pscustomobject]@{ At=$Now; Reason='plugin error' })
+            $Reader.Errors.Add([pscustomobject]@{ At=$Now; EmittedAt=$emitted; Reason='plugin error' })
         }
     }
 }
@@ -293,7 +310,8 @@ function Invoke-GpuBlock($Reader,$Clock,$Ready,[bool]$On,[int]$Similarity,[int]$
     $start=$Ready.ReceivedAt
     # Align the readiness record to collector receipt time; preserve actual emitted/received times.
     $block=[pscustomobject]@{ On=$On; Start=$start; MeasureStart=0.0; End=0.0; LogicalProcessors=$LogicalProcessors
-        Samples=@(); Records=@(); Errors=@(); FilterId=$Ready.Fields.filter_id; Similarity=$Similarity }
+        Samples=@(); Records=@(); Errors=@(); FilterId=$Ready.Fields.filter_id; Similarity=$Similarity
+        ObservationEnd=0.0; ClosingStatsAt=$null }
     $initial=$Ready
     $block.Records=@($initial)
     for ($i=0; $i -le 20; $i++) {
@@ -302,15 +320,31 @@ function Invoke-GpuBlock($Reader,$Clock,$Ready,[bool]$On,[int]$Similarity,[int]$
             Read-GpuFreshLog $Reader $Clock.Elapsed.TotalSeconds
             Start-Sleep -Milliseconds 20
         }
-        $at=$Clock.Elapsed.TotalSeconds
-        $block.Samples+=Get-GpuProcessSample $at $ObsPid $StartTicks
-        if ($i -eq 5) { $block.MeasureStart=$at }
-        if ($i -eq 20) { $block.End=$at }
+        $sample=Get-GpuProcessSample $Clock $ObsPid $StartTicks
+        $block.Samples+=$sample
+        if ($i -eq 5) { $block.MeasureStart=$sample.At }
+        if ($i -eq 20) { $block.End=$sample.At }
         Read-GpuFreshLog $Reader $Clock.Elapsed.TotalSeconds
     }
-    $block.Records=@($Reader.Records | Where-Object { $_.ReceivedAt -ge ($start-0.1) -and $_.ReceivedAt -le ($block.End+1) })
+    # Allow one further five-second producer interval plus existing one-second delivery latency.
+    # Do not take more CPU samples or change either measured endpoint while observing this tail.
+    $deadline=$block.End+6.2
+    while ($true) {
+        $now=$Clock.Elapsed.TotalSeconds
+        Read-GpuFreshLog $Reader $now
+        $closing=@($Reader.Records | Where-Object { $_.Kind -eq 'stats' -and $_.Fields.filter_id -ceq $block.FilterId -and
+            $_.EmittedAt -ge $block.End -and $_.EmittedAt-[double]$_.Fields.interval_host_elapsed_ms/1000 -le $block.End })
+        $observed=$Clock.Elapsed.TotalSeconds
+        if (($observed -ge ($block.End+1) -and $closing.Count -and -not $Reader.Pending) -or $observed -ge $deadline) { break }
+        Start-Sleep -Milliseconds 20
+    }
+    $block.ObservationEnd=$observed
+    if ($closing.Count) { $block.ClosingStatsAt=$closing[0].EmittedAt }
+    $block.Records=@($Reader.Records | Where-Object { $_.ReceivedAt -ge ($start-0.1) -and $_.ReceivedAt -le $block.ObservationEnd })
     if ($block.Records -notcontains $initial) { $block.Records=@($initial)+$block.Records }
-    $block.Errors=@($Reader.Errors | Where-Object { $_.At -ge $block.MeasureStart -and $_.At -le $block.End })
+    # Attribute delayed failures to emission, including the final block with no following prompt/drain.
+    $block.Errors=@($Reader.Errors | Where-Object { $_.EmittedAt -ge $start -and $_.EmittedAt -le $block.End -and $_.At -le $block.ObservationEnd })
+    if ($Reader.Pending) { $block.Errors+=[pscustomobject]@{ At=$now; Reason='incomplete line at bounded observation end' } }
     return $block
 }
 
@@ -356,7 +390,7 @@ try {
         $mode='OFF'; if ($on) { $mode='ON' }
         $null=Read-Host ("Define Processamento de imagem na GPU = $mode e prime Enter")
         $ready=Wait-GpuMode $reader $clock $on $filterId $similarity $clock.Elapsed.TotalSeconds
-        Write-Host "${mode}: 5 segundos para estabilizar, depois 15 segundos de medição. Mantém trabalho/movimento comparável."
+        Write-Host "${mode}: 5 segundos para estabilizar, depois 15 segundos de medição; até 6,2 segundos adicionais para fechar os logs. Mantém trabalho/movimento comparável."
         $block=Invoke-GpuBlock $reader $clock $ready $on $similarity $obsPid $startTicks $logical
         $blocks+=$block
         if (-not (Test-GpuProcessingBlock $block)) { Write-Host 'Bloco inválido; o resumo será inconclusivo.' }
@@ -382,6 +416,7 @@ try {
         "Qualidade: $quality; alternância: $switch; resize: $resize; recriação: $recreated"
         "OBS: $($facts.ObsVersion); processadores lógicos: $logical; Windows: $($facts.WindowsVersion)"
         'Comparação sequencial ao vivo; sem confiança estatística. Tempos de componentes são host elapsed, incluindo esperas.'
+        'CPU usa os instantes reais de leitura; aquisição >50 ms ou desvio da janela >50 ms invalida o bloco. Observação dos logs até 6,2 s após CPU, sem prolongar a medição.'
         'Rendering lag usa limites dos registos de telemetria, diferentes da janela exata CPU; dropped/network frames: evidência incompleta.'
         'Os logs e amostras completos ficam locais. Envia apenas este resumo.')
     $settings=@($blocks[0].Records | Where-Object {$_.Kind -eq 'stats' -and $_.Fields.filter_id -ceq $filterId})[0].Fields
@@ -391,6 +426,8 @@ try {
     for ($i=0; $i -lt $blocks.Count; $i++) {
         $records=@($blocks[$i].Records | Where-Object {$_.Kind -eq 'stats' -and $_.Fields.filter_id -ceq $filterId})
         $last=$records[-1].Fields
+        $queryMax=($blocks[$i].Samples | Measure-Object -Property AcquisitionSeconds -Maximum).Maximum
+        $summary+=("Limites bloco "+($i+1)+": CPU=$($blocks[$i].MeasureStart)..$($blocks[$i].End)s; fecho_telemetria=$($blocks[$i].ClosingStatsAt)s; observação_até=$($blocks[$i].ObservationEnd)s; aquisição_CPU_máxima_ms="+($queryMax*1000))
         $summary+=("Bloco "+($i+1)+": válido="+(Test-GpuProcessingBlock $blocks[$i])+"; PID=$obsPid; geração=$($last.generation); provider=$($last.effective_inference); requested=$($last.requested); state=$($last.state); stages=$($last.preprocess_active)/$($last.mask_active); captured=$($last.captured); input_pixels=$($last.input_readback_pixels); similarity_pixels=$($last.similarity_readback_pixels); intervalo_telemetria_host_ms=$($last.interval_host_elapsed_ms); capture/inference/mask_host_ms=$($last.capture_host_elapsed_ms)/$($last.inference_host_elapsed_ms)/$($last.mask_host_elapsed_ms)")
     }
     for ($i=0; $i -lt $lag.Count; $i++) { $summary+=("Bloco "+($i+1)+" render: "+($lag[$i] | ConvertTo-Json -Compress)) }

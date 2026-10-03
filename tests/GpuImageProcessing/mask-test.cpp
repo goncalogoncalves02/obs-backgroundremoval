@@ -11,6 +11,7 @@
 #include "background-mask-cpu.hpp"
 #include "graphics-fault-controls.hpp"
 #include "blend-state-probe.hpp"
+#include "mask-comparison.hpp"
 #include <opencv2/imgproc.hpp>
 using namespace gpu_image;
 
@@ -46,23 +47,14 @@ static cv::Mat read_mask(gs_texture_t *texture)
 	gs_stagesurface_destroy(stage);
 	return mask;
 }
-static double foreground_iou(const cv::Mat &actual, const cv::Mat &reference)
-{
-	cv::Mat a = actual > 128, b = reference > 128, both, either;
-	cv::bitwise_and(a, b, both);
-	cv::bitwise_or(a, b, either);
-	const int count = cv::countNonZero(either);
-	return count == 0 ? 1.0 : static_cast<double>(cv::countNonZero(both)) / count;
-}
 static void compare(const cv::Mat &actual, const cv::Mat &reference, const char *name)
 {
-	require(actual.size() == reference.size() && actual.type() == CV_8UC1, "Final mask dimensions/type differ");
-	const double mae = cv::norm(actual, reference, cv::NORM_L1) / (static_cast<double>(reference.total()) * 255.0);
-	const double iou = foreground_iou(actual, reference);
+	const auto metrics = gpu_test::compare_masks(actual, reference);
 	std::cout << "mask-reference case=" << name << " dimensions=" << actual.cols << 'x' << actual.rows
-		  << " normalized-mae=" << mae << " foreground-iou=" << iou << std::endl;
-	require(mae <= 0.01, "Final mask exceeds normalized MAE0.01");
-	require(iou >= 0.98, "Final mask foreground IoU below0.98");
+		  << " normalized-mae=" << metrics.normalized_mae
+		  << " retained-alpha-iou=" << metrics.retained_alpha_iou
+		  << " positive-background-iou=" << metrics.positive_background_iou << std::endl;
+	require(metrics.passes(), "Final mask exceeds MAE0.01 or retained-alpha/positive-background IoU0.98");
 }
 static cv::Mat scene()
 {
@@ -191,10 +183,12 @@ void run_mask_cases(const std::filesystem::path &effect_root)
 		require(cv::countNonZero(actual != value) == 0,
 			"Known empty/full masks must retain every exact constant byte");
 	}
-	require(foreground_iou(cv::Mat::zeros(2, 2, CV_8UC1), cv::Mat::zeros(2, 2, CV_8UC1)) == 1,
-		"Both empty sets IoU must be1");
-	require(foreground_iou(cv::Mat::zeros(2, 2, CV_8UC1), cv::Mat(2, 2, CV_8UC1, cv::Scalar(255))) == 0,
-		"Exactly one empty set IoU must be0");
+	const cv::Mat empty(2, 2, CV_8UC1, cv::Scalar(255));
+	const cv::Mat full(2, 2, CV_8UC1, cv::Scalar(0));
+	require(gpu_test::compare_masks(empty, empty).retained_alpha_iou == 1,
+		"Both empty retained-alpha sets IoU must be1");
+	require(gpu_test::compare_masks(empty, full).retained_alpha_iou == 0,
+		"Exactly one empty retained-alpha set IoU must be0");
 	std::cout << "case same_size_reuses_resources" << std::endl;
 	settings = {};
 	settings.enable_threshold = true;
