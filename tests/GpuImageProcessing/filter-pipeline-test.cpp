@@ -251,6 +251,70 @@ void on_obs_thread(std::function<void()> action)
 	check(result == std::future_status::ready, "Serial actual OBS callback timed out");
 	complete.get();
 }
+// A queued task owns its request until it runs, including after a timeout in
+// the waiting thread. Never put stack storage behind an asynchronous OBS task.
+std::future<void> queue_obs_action(obs_task_type type, std::function<void()> action)
+{
+	auto request = std::make_unique<SerialAction>(std::move(action));
+	auto completion = request->done.get_future();
+	obs_queue_task(
+		type,
+		[](void *data) {
+			auto owned = std::unique_ptr<SerialAction>(static_cast<SerialAction *>(data));
+			serial_action(owned.get(), 0.0f);
+		},
+		request.release(), false);
+	return completion;
+}
+void finish_obs_action(std::future<void> completion, const char *message)
+{
+	check(completion.wait_for(std::chrono::seconds(10)) == std::future_status::ready, message);
+	completion.get();
+}
+void wait_for_video_source_destruction()
+{
+	// This fixture has only private VIDEO sources and no outputs/audio consumers.
+	// Pinned OBS 0052 releases tick_sources' temporary refs before graphics tasks;
+	// source_release enqueues destroy_defer before returning. Fence that thread,
+	// then the real destruction worker, before inspecting retained plugin state.
+	// obs_wait_for_destroy_queue is unsuitable here: it returns immediately without
+	// audio, and even with audio its bool means tasks processed, not drain success.
+	finish_obs_action(queue_obs_action(OBS_TASK_GRAPHICS, [] {}), "OBS video release barrier timed out");
+	finish_obs_action(queue_obs_action(OBS_TASK_DESTROY, [] {}), "OBS source destruction barrier timed out");
+}
+void destruction_barrier_regression()
+{
+	// Prove a queued barrier cannot complete while earlier real destroy work is
+	// blocked. Promises establish ordering without sleeps or guessed durations.
+	auto entered = std::make_shared<std::promise<void>>();
+	auto started = entered->get_future();
+	std::promise<void> release;
+	auto released = release.get_future().share();
+	auto blocked = queue_obs_action(OBS_TASK_DESTROY, [entered, released] {
+		entered->set_value();
+		check(released.wait_for(std::chrono::seconds(10)) == std::future_status::ready,
+		      "Destroy barrier regression gate was not released");
+	});
+	finish_obs_action(std::move(started), "Actual destroy worker did not enter regression gate");
+	auto barrier = queue_obs_action(OBS_TASK_DESTROY, [] {});
+	const bool waited = barrier.wait_for(std::chrono::seconds(0)) == std::future_status::timeout;
+	release.set_value();
+	finish_obs_action(std::move(blocked), "Actual destroy worker did not leave regression gate");
+	finish_obs_action(std::move(barrier), "Queued destroy barrier did not finish");
+	check(waited, "Destroy barrier completed before the earlier queued task");
+	// No objects remain to destroy. Already-drained is a successful completion too.
+	wait_for_video_source_destruction();
+	wait_for_video_source_destruction();
+	std::cout << "filter-destroy-barrier queued-work=waited already-drained=completed PASS" << std::endl;
+}
+using WeakSource = std::unique_ptr<obs_weak_source_t, decltype(&obs_weak_source_release)>;
+void require_source_expired(const WeakSource &weak)
+{
+	check(weak && obs_weak_source_expired(weak.get()), "Destroyed OBS source still has a strong owner");
+	auto *revived = obs_weak_source_get_source(weak.get());
+	obs_source_release(revived);
+	check(revived == nullptr, "Destroyed OBS source could still be acquired from its weak handle");
+}
 void process_frame(obs_source_t *filter, obs_source_t *source)
 {
 	on_obs_thread([&] {
@@ -910,9 +974,17 @@ void run_lifetimes()
 		obs_source_t *filter = nullptr;
 		obs_data_t *settings = nullptr;
 		bool attached = false;
+		WeakSource weak_source(nullptr, &obs_weak_source_release),
+			weak_filter(nullptr, &obs_weak_source_release);
+		unsigned live_resources_before;
+		{
+			GraphicsScope graphics;
+			live_resources_before = gpu_test::counts().live_resources;
+		}
 		try {
 			source = obs_source_create_private("gpu_image_native_fixture_source", "native source", nullptr);
 			check(source != nullptr, "Actual fixture source creation failed");
+			weak_source.reset(obs_source_get_weak_source(source));
 			settings = obs_data_create();
 			check(settings != nullptr, "Actual settings allocation failed");
 			background_filter_defaults(settings);
@@ -921,6 +993,7 @@ void run_lifetimes()
 			filter = obs_source_create_private("gpu_image_native_background_filter",
 							   "native background filter", settings);
 			check(filter != nullptr, "Actual background filter source creation failed");
+			weak_filter.reset(obs_source_get_weak_source(filter));
 			obs_source_filter_add(source, filter);
 			attached = true;
 			auto tf = instance(filter);
@@ -1034,11 +1107,17 @@ void run_lifetimes()
 			attached = false;
 			obs_source_release(filter);
 			filter = nullptr;
-			check(obs_wait_for_destroy_queue(), "OBS destroy queue did not drain");
+			wait_for_video_source_destruction();
+			require_source_expired(weak_filter);
 			{
 				std::lock_guard stateLock(tf->imageStateMutex);
 				const auto config = tf->imagePipeline.snapshot();
 				check(tf->imageTerminal, "Removal did not invalidate legacy callback authority");
+				const auto processing = tf->imagePipeline.processing_snapshot();
+				check(!processing.preprocess_active && !processing.mask_active && !tf->legacyFrame &&
+					      !tf->legacyMask && !tf->imagePipeline.latest_frame() &&
+					      !tf->imagePipeline.latest_mask(),
+				      "Destruction retained active processing or published packets");
 				gpu_image::MaskPacket late{{config.generation, tf->imageFrameId + 1, config.source,
 							    config.input},
 							   cv::Mat(144, 256, CV_8UC1, cv::Scalar(0)),
@@ -1047,6 +1126,13 @@ void run_lifetimes()
 				      "Terminal same-generation pipeline accepted a late mask");
 			}
 			check(tf->isDisabled, "Removal did not disable the retained callback lifetime");
+			{
+				GraphicsScope graphics;
+				check(!tf->imageDisplayTexture && !tf->imageCandidateTexture && !tf->imageDisplayValid,
+				      "Destruction retained owned display resources");
+				check(gpu_test::counts().live_resources == live_resources_before,
+				      "Actual filter/helper graphics resources leaked across removal");
+			}
 			// A retained shared lifetime is valid; an OBS-owned void* deleted at destroy is not.
 			background_filter_video_tick(&tf, 1.0f / 30.0f);
 			{
@@ -1054,20 +1140,28 @@ void run_lifetimes()
 				background_filter_video_render(&tf, nullptr);
 			}
 			check(tf->isDisabled, "Late retained callback revived a removed filter");
+			std::weak_ptr<background_removal_filter> weak_lifetime = tf;
+			tf.reset();
+			check(weak_lifetime.expired(), "Destroyed filter retained a callback/session lifetime");
+			obs_source_release(source);
+			source = nullptr;
+			wait_for_video_source_destruction();
+			require_source_expired(weak_source);
+			std::cout
+				<< "filter-destroy cycle=" << cycle
+				<< " filter/source=expired terminal=invalidated graphics=released late-callbacks=rejected lifetime=released PASS"
+				<< std::endl;
 		} catch (...) {
 			if (filter) {
 				if (attached)
 					obs_source_filter_remove(source, filter);
 				obs_source_release(filter);
-				obs_wait_for_destroy_queue();
 			}
 			obs_source_release(source);
 			obs_data_release(settings);
 			throw;
 		}
-		obs_source_release(source);
 		obs_data_release(settings);
-		obs_wait_for_destroy_queue();
 	}
 	check(boundaries >= 64, "Mixed callback lifecycle boundary count below 64");
 	std::cout << "filter-lifecycle boundaries=" << boundaries << " actual-callbacks PASS" << std::endl;
@@ -1101,6 +1195,7 @@ int main(int argc, char **argv)
 		register_sources();
 		raw_output_regression();
 		initialized_mask_is_not_completion();
+		destruction_barrier_regression();
 		run_lifetimes();
 		obs_shutdown();
 		started = false;
