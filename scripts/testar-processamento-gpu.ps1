@@ -335,7 +335,8 @@ function Invoke-GpuBlock($Reader,$Clock,$Ready,[bool]$On,[int]$Similarity,[int]$
         $closing=@($Reader.Records | Where-Object { $_.Kind -eq 'stats' -and $_.Fields.filter_id -ceq $block.FilterId -and
             $_.EmittedAt -ge $block.End -and $_.EmittedAt-[double]$_.Fields.interval_host_elapsed_ms/1000 -le $block.End })
         $observed=$Clock.Elapsed.TotalSeconds
-        if (($observed -ge ($block.End+1) -and $closing.Count -and -not $Reader.Pending) -or $observed -ge $deadline) { break }
+        # Completion time does not advance this read's byte snapshot. Require a read begun after the boundary.
+        if (($now -ge ($block.End+1) -and $closing.Count -and -not $Reader.Pending) -or $now -ge $deadline) { break }
         Start-Sleep -Milliseconds 20
     }
     $block.ObservationEnd=$observed

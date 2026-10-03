@@ -71,6 +71,39 @@ function Collect([string]$Case='Healthy',[string]$Stage='',[double]$Endpoint=20)
  $ready=Record 0 $true;$reader.Records.Add($ready)
  Invoke-GpuBlock $reader $script:clock $ready $true 0 101 $script:processStart.Ticks 16
 }
+# Adapt only the return boundary of the real file read: bytes can arrive after its snapshot.
+# Local function adapters do not alter the production parser or leak into the other cases.
+function Collect-TerminalBoundary([string]$Scenario) {
+ $actualReader=${function:Read-GpuFreshLog}
+ $deadline=$Scenario -like 'Deadline*'
+ $boundary=21.0;if($deadline){$boundary=26.2}
+ $race=[pscustomobject]@{Injected=$false;LastReadStart=-1.0;Reader=$null}
+ Set-Item function:local:Start-Sleep -Value {
+  param([int]$Milliseconds)
+  $script:clock.Elapsed.TotalSeconds=[Math]::Round(($script:clock.Elapsed.TotalSeconds+$Milliseconds/1000.0),2)
+  Emit
+ }
+ Set-Item function:local:Read-GpuFreshLog -Value {
+  param($Reader,[double]$Now)
+  & $actualReader $Reader $Now
+  $race.LastReadStart=$Now;$race.Reader=$Reader
+  if(-not $race.Injected -and $Now -ge ($boundary-0.02) -and $Now -lt $boundary) {
+   $script:clock.Elapsed.TotalSeconds=$boundary-0.01
+   if($Scenario -eq 'MinimumError') {
+    [IO.File]::AppendAllText($script:path,'12:00:20.000: [obs-backgroundremoval] ERROR terminal processing failed'+[Environment]::NewLine)
+   } elseif($Scenario -eq 'DeadlineCompletedLine') {
+    # Finish the real previously ingested partial line after this read's byte snapshot.
+    [IO.File]::AppendAllText($script:path,[Environment]::NewLine)
+   }
+   $script:clock.Elapsed.TotalSeconds=$boundary+0.02
+   if($Scenario -eq 'DeadlineOverrun'){$script:clock.Elapsed.TotalSeconds=$boundary+0.10}
+   $race.Injected=$true
+  }
+ }
+ $case='Healthy';if($deadline){$case='IncompleteTail'}
+ $block=Collect $case
+ [pscustomobject]@{Block=$block;Injected=$race.Injected;LastReadStart=$race.LastReadStart;Pending=$race.Reader.Pending;Boundary=$boundary}
+}
 $failures=@()
 function Case([string]$Name,[scriptblock]$Action) {
  try{& $Action;Write-Output "$Name PASS"}catch{$script:failures+=$Name+': '+$_.Exception.Message;Write-Output "$Name FAIL: $($_.Exception.Message)"}
@@ -83,6 +116,26 @@ try {
  foreach($stage in @('GetProcess','Refresh','Counter')) {foreach($endpoint in @(5,20)) {
   Case ("acquisition $stage at $endpoint") {$b=Collect 'Healthy' $stage $endpoint;Check (-not (Test-GpuProcessingBlock $b)) ("Delayed $stage accepted CPU="+(Get-BlockCpuPercentage $b));Check ($b.Samples[$endpoint].At -ge ($endpoint+4)) 'Sample labelled before actual CPU acquisition'}
  }}
+ foreach($scenario in @('MinimumError','MinimumHealthy','DeadlineCompletedLine','DeadlineOverrun')) {
+  Case ("terminal snapshot $scenario") {
+   $r=Collect-TerminalBoundary $scenario;$b=$r.Block
+   Check $r.Injected 'Terminal read did not cross its actual byte-snapshot boundary'
+   Check ($b.MeasureStart -eq 5 -and $b.End -eq 20 -and $b.Samples.Count -eq 21) 'Terminal drain changed CPU endpoints or sample count'
+   Check ($b.ObservationEnd -eq $script:clock.Elapsed.TotalSeconds) 'Observation end is not actual completion time'
+   if($scenario -eq 'MinimumError') {
+    Write-Output ("terminal error end=$($b.End); observationEnd=$($b.ObservationEnd); capturedErrors=$($b.Errors.Count); accepted="+(Test-GpuProcessingBlock $b))
+    Check ($b.Errors.Count -eq 1 -and -not (Test-GpuProcessingBlock $b)) 'Permitted terminal error after byte snapshot was lost'
+   } elseif($scenario -eq 'MinimumHealthy') {
+    Check (Test-GpuProcessingBlock $b) 'Healthy closing statistics rejected after final barrier'
+    Check ([Math]::Abs((Get-BlockCpuPercentage $b)-3) -lt 0.00001) 'Terminal read changed constant 3% CPU'
+   } else {
+    Check (-not (Test-GpuProcessingBlock $b)) 'Late/incomplete deadline telemetry or overlong observation accepted'
+    if($scenario -eq 'DeadlineCompletedLine'){Check (-not $r.Pending) 'Timeout accepted a pre-deadline partial-byte snapshot'}
+    else{Check ([bool]$r.Pending -and $b.ObservationEnd -gt ($b.End+6.25)) 'Overrun did not preserve incomplete pending bytes and actual latency'}
+   }
+   Check ($r.LastReadStart -ge $r.Boundary) 'Collector terminated on a read started before the required boundary'
+  }
+ }
  if($failures.Count){throw ($failures -join [Environment]::NewLine)}
  'collector end coverage and actual OS acquisition PASS'
 } finally {Remove-Item -LiteralPath $script:path -Force}
