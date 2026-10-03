@@ -21,28 +21,47 @@ void check(bool condition, const char *message)
 	if (!condition)
 		throw std::runtime_error(message);
 }
-bool valid_probability_output(const cv::Mat &output)
+bool valid_raw_model_output(const cv::Mat &output)
 {
-	if (output.empty() || output.dims != 2 || output.type() != CV_32FC1 || !cv::checkRange(output))
+	if (output.empty() || output.dims != 2 || output.type() != CV_32FC1)
 		return false;
-	double minimum, maximum;
-	cv::minMaxLoc(output, &minimum, &maximum);
-	// checkRange's max is exclusive and cast to float for CV_32F. Keep finite
-	// validation separate, then use exact inclusive bounds without a tolerance.
-	return minimum >= 0.0 && maximum <= 1.0;
+	// MediaPipe currently exposes its raw second channel. Preserve that contract;
+	// even finite FLT_MAX is finite (checkRange's default upper bound excludes it).
+	for (int row = 0; row < output.rows; ++row) {
+		const auto *values = output.ptr<float>(row);
+		for (int column = 0; column < output.cols; ++column)
+			if (!std::isfinite(values[column]))
+				return false;
+	}
+	return true;
 }
-void probability_endpoint_regression()
+void raw_output_regression()
 {
-	for (float value : {0.0f, -0.0f, 1.0f})
-		check(valid_probability_output(cv::Mat(1, 1, CV_32FC1, cv::Scalar(value))),
-		      "Exact inclusive probability endpoint was rejected");
-	for (float value : {std::nextafter(1.0f, std::numeric_limits<float>::infinity()), -0.25f,
-			    std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+	for (float value :
+	     {0.0f, -0.0f, 1.0f, std::nextafter(1.0f, std::numeric_limits<float>::infinity()), -16.5347233f,
+	      -7.18417215f, std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()})
+		check(valid_raw_model_output(cv::Mat(1, 1, CV_32FC1, cv::Scalar(value))),
+		      "Finite actual raw-channel values were treated as normalized probabilities");
+	for (float value : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
 			    -std::numeric_limits<float>::infinity()})
-		check(!valid_probability_output(cv::Mat(1, 1, CV_32FC1, cv::Scalar(value))),
-		      "Non-finite or out-of-range probability was accepted");
-	std::cout << "filter-baseline probability-regression endpoints=inclusive nonfinite/outside=rejected"
-		  << std::endl;
+		check(!valid_raw_model_output(cv::Mat(1, 1, CV_32FC1, cv::Scalar(value))),
+		      "Non-finite raw output was accepted");
+	check(!valid_raw_model_output({}) && !valid_raw_model_output(cv::Mat(1, 1, CV_8UC1, cv::Scalar(0))) &&
+		      !valid_raw_model_output(cv::Mat(1, 1, CV_32FC2, cv::Scalar(0, 0))),
+	      "Empty or incorrectly typed raw output was accepted");
+	const int sizes[]{1, 1, 1};
+	check(!valid_raw_model_output(cv::Mat(3, sizes, CV_32FC1, cv::Scalar(0))),
+	      "Non-image raw output dimensions were accepted");
+	cv::Mat raw(1, 2, CV_32FC1);
+	raw.at<float>(0, 0) = -16.5347233f;
+	raw.at<float>(0, 1) = -7.18417215f;
+	cv::Mat converted;
+	raw.convertTo(converted, CV_8U, 255.0);
+	check(converted.type() == CV_8UC1 && converted.size() == raw.size() && cv::countNonZero(converted) == 0,
+	      "Baseline conversion of actual finite negative raw output changed");
+	std::cout
+		<< "filter-baseline raw-output-regression finite-outside-unit-range=accepted nonfinite/type/dims=rejected baseline-conversion=preserved"
+		<< std::endl;
 }
 // A test-only observer of the real MediaPipe implementation. Every operation
 // delegates unchanged base behavior; no synthetic Session, tensors or success.
@@ -74,41 +93,48 @@ struct ObservedMediaPipe final : ModelMediaPipe {
 	{
 		check(run_completed, "MediaPipe postprocess has no completed real Session::Run");
 		ModelMediaPipe::postprocessOutput(output);
-		const bool valid = valid_probability_output(output);
+		const bool valid = valid_raw_model_output(output);
 		if (completed_outputs == 0 || !valid) {
 			if (!output.empty() && output.dims == 2 && output.type() == CV_32FC1) {
 				double minimum, maximum;
 				cv::minMaxLoc(output, &minimum, &maximum);
 				obs_log(LOG_INFO,
-					"Actual CPU MediaPipe output width=%d height=%d finite=%s min=%.9g max=%.9g valid=%s",
-					output.cols, output.rows, cv::checkRange(output) ? "true" : "false", minimum,
-					maximum, valid ? "true" : "false");
+					"Actual CPU MediaPipe raw output width=%d height=%d finite=%s min=%.9g max=%.9g valid=%s",
+					output.cols, output.rows, valid ? "true" : "false", minimum, maximum,
+					valid ? "true" : "false");
 			} else {
-				obs_log(LOG_INFO, "Actual CPU MediaPipe output dims=%d type=%d empty=%s valid=false",
+				obs_log(LOG_INFO,
+					"Actual CPU MediaPipe raw output dims=%d type=%d empty=%s valid=false",
 					output.dims, output.type(), output.empty() ? "true" : "false");
 			}
 		}
-		check(valid, "Actual MediaPipe output must be finite single-channel probabilities in [0,1]");
+		check(valid, "Actual MediaPipe raw output must be a finite 2D single-channel float image");
 		completed_output = output.clone();
 		++completed_outputs;
 		run_completed = false;
 	}
 };
-void require_completed_cpu_mask(uint64_t completed_runs, uint64_t completed_outputs, const cv::Mat &probabilities,
+void require_completed_cpu_mask(uint64_t completed_runs, uint64_t completed_outputs, const cv::Mat &raw_output,
 				const cv::Mat &displayed, gpu_image::Dimensions output, gpu_image::Dimensions source,
 				const gpu_image::MaskSettings &settings)
 {
 	check(completed_runs > 0 && completed_outputs == completed_runs,
 	      "Actual CPU Session::Run and delegated MediaPipe postprocess did not both complete");
-	check(!probabilities.empty() && probabilities.type() == CV_32FC1 &&
-		      probabilities.cols == static_cast<int>(output.width) &&
-		      probabilities.rows == static_cast<int>(output.height),
+	check(valid_raw_model_output(raw_output) && raw_output.cols == static_cast<int>(output.width) &&
+		      raw_output.rows == static_cast<int>(output.height),
 	      "Completed actual output differs from validated model dimensions");
 	check(!displayed.empty() && displayed.type() == CV_8UC1 && displayed.cols == static_cast<int>(source.width) &&
 		      displayed.rows == static_cast<int>(source.height),
 	      "Actual CPU display mask has invalid type or source dimensions");
 	cv::Mat bytes;
-	probabilities.convertTo(bytes, CV_8U, 255.0);
+	raw_output.convertTo(bytes, CV_8U, 255.0);
+	check(bytes.type() == CV_8UC1 && bytes.size() == raw_output.size(),
+	      "Baseline converted model mask has invalid type or dimensions");
+	double minimum, maximum;
+	cv::minMaxLoc(bytes, &minimum, &maximum);
+	check(minimum >= 0.0 && maximum <= 255.0, "Baseline converted model mask is not bounded to [0,255]");
+	cv::minMaxLoc(displayed, &minimum, &maximum);
+	check(minimum >= 0.0 && maximum <= 255.0, "Actual displayed CPU mask is not bounded to [0,255]");
 	// The deterministic baseline never changes input/settings; repeated temporal
 	// histories therefore equal the same threshold result. Use the already
 	// validated retained CPU reference, without bypassing actual callback work.
@@ -359,14 +385,14 @@ void run_lifetimes()
 			const auto errors_before = gpu_filter_test::error_count();
 			tick_baseline_on_obs_thread(obs_obj_get_data(filter), source);
 			uint64_t completed_runs, completed_outputs;
-			cv::Mat actual_probabilities, actual_mask;
+			cv::Mat actual_raw_output, actual_mask;
 			gpu_image::Dimensions output_dimensions;
 			gpu_image::MaskSettings mask_settings;
 			{
 				std::lock_guard lock(tf->modelMutex);
 				completed_runs = observer->completed_runs;
 				completed_outputs = observer->completed_outputs;
-				actual_probabilities = observer->completed_output.clone();
+				actual_raw_output = observer->completed_output.clone();
 				output_dimensions = {static_cast<uint32_t>(tf->outputDims.at(0).at(2)),
 						     static_cast<uint32_t>(tf->outputDims.at(0).at(1))};
 				mask_settings = {tf->enableThreshold, tf->threshold,     tf->temporalSmoothFactor,
@@ -377,7 +403,7 @@ void run_lifetimes()
 				std::lock_guard lock(tf->outputLock);
 				actual_mask = tf->backgroundMask.clone();
 			}
-			require_completed_cpu_mask(completed_runs, completed_outputs, actual_probabilities, actual_mask,
+			require_completed_cpu_mask(completed_runs, completed_outputs, actual_raw_output, actual_mask,
 						   output_dimensions, {321, 181}, mask_settings);
 			check(gpu_filter_test::error_count() == errors_before,
 			      "Actual CPU baseline emitted a plugin error");
@@ -481,7 +507,7 @@ int main(int argc, char **argv)
 		std::cout << "filter-core graphics=" << module_name << " reset begin" << std::endl;
 		check(obs_reset_video(&video) == OBS_VIDEO_SUCCESS, "Actual OBS graphics/video initialization failed");
 		register_sources();
-		probability_endpoint_regression();
+		raw_output_regression();
 		initialized_mask_is_not_completion();
 		run_lifetimes();
 		obs_shutdown();
