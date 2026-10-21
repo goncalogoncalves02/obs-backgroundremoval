@@ -1,6 +1,7 @@
 <!--
 SPDX-FileCopyrightText: 2021-2026 Roy Shilkrot <roy.shil@gmail.com>
 SPDX-FileCopyrightText: 2023-2026 Kaito Udagawa <umireon@kaito.tokyo>
+SPDX-FileCopyrightText: 2026 Gonçalo Filipe Brigues Gonçalves <goncalogoncalves.02@gmail.com>
 
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
@@ -28,6 +29,18 @@ A plugin for [OBS Studio](https://obsproject.com/) that allows you to replace th
 Or, browse versions on [releases page](https://github.com/royshil/obs-backgroundremoval/releases).
 
 > Not working? Please try [the Lite version (Live Background Removal Lite)](https://github.com/kaito-tokyo/live-backgroundremoval-lite) developed by one of us (Kaito Udagawa).
+
+## Windows AMD DirectML preview in this fork
+
+This fork adds **MediaPipe inference through DirectML** and optional **GPU image processing** for input downscaling and mask processing on Windows.
+
+- [Download the Windows x64 preview](https://github.com/goncalogoncalves02/obs-backgroundremoval/releases/tag/1.4.1-amd-directml-preview.1).
+- [Install and configure DirectML + GPU image processing](docs/windows-ml-gpu-image-processing.md).
+- [Hardware acceptance and CPU comparison](docs/windows-ml-gpu-image-processing-acceptance.md).
+
+The accepted configuration is **MediaPipe + GPU - DirectML**, **GPU image processing ON**, and **Skip image based on similarity OFF**. The owner's RX 9070 XT test measured whole-OBS CPU falling from **7.74% to 1.68%** with the same DirectML inference in both modes. This is a short sequential result on one scene/hardware setup, not a guarantee for other GPUs. CPU remains the default and explicit fallback; the preview is a Windows-only download from this fork.
+
+The upstream project links above remain available for its original releases and documentation. For this fork's current source, release and verification status, read the [Windows ML handoff](docs/windows-ml-amd-session-handoff.md).
 
 ## Usage
 
@@ -93,7 +106,7 @@ If you are looking for hands-on help or private consultation please select a [sp
 
 GPU support:
 
-- On Windows, we plan to support WinML acceleration.
+- On Windows, this fork supports Windows ML + DirectML inference for MediaPipe, with optional GPU image processing. See the [Windows guide](docs/windows-ml-gpu-image-processing.md).
 - On Mac we support CoreML for acceleration, which is efficient on Apple Silicon. **Note:** This plugin does not support cross-architecture translation (Rosetta2). Intel binaries on Apple Silicon or Apple Silicon binaries on Intel will crash.
 - On Linux CUDA, ROCM (deprecated in ONNX Runtime 1.23.0), and MIGraphX are supported if this plugin is built from source. Ensure your ONNX Runtime installation has CUDA, ROCM, or MIGraphX support. For AMD GPUs, MIGraphX is recommended as ROCM was removed from ONNX Runtime starting with version 1.23.0.
 - The goal of this plugin is to be available for everyone on every system, even if they don't own a GPU.

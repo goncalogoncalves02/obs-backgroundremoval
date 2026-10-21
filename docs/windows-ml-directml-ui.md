@@ -27,8 +27,13 @@ status and mask, then switch back to CPU. Remove and recreate the filter once
 and confirm that the saved device choice works. Any CPU fallback requires
 checking the corresponding session outcome in the log.
 
-Inference runs on the GPU with DirectML. Camera handling, image preparation,
-mask processing and other OBS work still use the CPU. Earlier measurements of
+Inference runs on the GPU with DirectML. With **GPU image processing** OFF,
+image preparation and mask processing retain the earlier CPU path. With it ON,
+eligible MediaPipe sessions also downscale the input and process mask borders
+on the GPU; small-mask contours, camera handling and other OBS work still
+include CPU work. See the [GPU image-processing guide](windows-ml-gpu-image-processing.md)
+for installation, status, recommended settings and the accepted whole-OBS CPU result.
+Earlier measurements of
 the unchanged session backend showed approximately 2.50 ms for CPU and 0.40 ms
 for DirectML on the owner's RX 9070 XT. These timings measure model inference,
 not total CPU utilization, OBS frame rate or this UI's live acceptance.
